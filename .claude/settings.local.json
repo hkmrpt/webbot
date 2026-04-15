@@ -6,7 +6,10 @@
       "Read(//mnt/c/Users/hkmrp/PycharmProjects/**)",
       "Bash(python -c ':*)",
       "Bash(python -c \"import buy_app; print\\('buy_app OK'\\)\")",
-      "Bash(python -c \"import buy_app; print\\('OK'\\)\")"
+      "Bash(python -c \"import buy_app; print\\('OK'\\)\")",
+      "Bash(ls -lh /c/Users/hkmrp/PycharmProjects/webbot/*.py /c/Users/hkmrp/PycharmProjects/webbot/*.html /c/Users/hkmrp/PycharmProjects/webbot/*.json /c/Users/hkmrp/PycharmProjects/webbot/static/js/* /c/Users/hkmrp/PycharmProjects/webbot/static/css/*)",
+      "Bash(.venv/Scripts/python.exe:*)",
+      "Bash(ls /c/Users/hkmrp/PycharmProjects/webbot/self_tuner*)"
     ]
   }
 }

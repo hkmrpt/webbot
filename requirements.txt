@@ -3,5 +3,3 @@ flask-socketio==5.3.6
 websockets==12.0
 python-engineio==4.9.1
 python-socketio==5.11.3
-
-numpy~=2.4.3

@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Semi-Auto Option Bot</title>
+<link rel="stylesheet" href="/static/css/app.css">
+</head>
+<body>
+<div id="app">
+
+  <!-- ══ SIDEBAR ══════════════════════════════════════════════════════════ -->
+  <aside id="sidebar">
+
+    <!-- Header -->
+    <div class="sb-header">
+      <div class="brand">Semi-Auto Bot <span class="ws-dot" id="ws-dot"></span></div>
+      <div class="version">NIFTY Options · Zerodha</div>
+    </div>
+
+    <!-- Mode -->
+    <div class="sb-section">
+      <div class="sb-label">Mode</div>
+      <div class="mode-row">
+        <button class="mode-btn active-demo" data-mode="demo">● DEMO</button>
+        <button class="mode-btn" data-mode="real">● REAL</button>
+      </div>
+    </div>
+
+    <!-- Status -->
+    <div class="sb-section">
+      <div class="sb-label">Status</div>
+      <span class="status-badge status-idle" id="status-badge">
+        <span class="dot"></span>IDLE
+      </span>
+    </div>
+
+    <!-- Instrument -->
+    <div class="sb-section">
+      <div class="sb-label">Instrument</div>
+      <div class="field-group">
+        <div class="field-label">Symbol (CE or PE)</div>
+        <input type="text" id="inp-instrument" placeholder="e.g. NIFTY2642124250CE or NIFTY2642124250CE/16237570" autocomplete="off" spellcheck="false">
+      </div>
+      <div class="field-group">
+        <div class="field-label">Quantity (lots)</div>
+        <input type="number" id="inp-qty" value="1" min="1" max="50">
+      </div>
+    </div>
+
+    <!-- Lines -->
+    <div class="sb-section">
+      <div class="sb-label">Lines  <span style="color:var(--text2);font-size:9px;font-weight:400">(drag on chart or type)</span></div>
+
+      <div class="field-group line-entry">
+        <div class="field-label">
+          <span>● Entry Line (blue)</span>
+          <button id="btn-set-entry" style="background:transparent;border:none;color:var(--blue);cursor:pointer;font-size:10px;padding:0">⊕ set to LTP</button>
+        </div>
+        <div class="input-row">
+          <span class="line-dot entry"></span>
+          <input type="number" id="inp-entry" placeholder="NIFTY price" step="0.5">
+        </div>
+      </div>
+
+      <div class="field-group line-sl">
+        <div class="field-label">
+          <span>● SL Line (red)</span>
+          <span class="field-offset" id="sl-offset"></span>
+        </div>
+        <div class="input-row">
+          <span class="line-dot sl"></span>
+          <input type="number" id="inp-sl" placeholder="NIFTY stop level" step="0.5">
+        </div>
+      </div>
+
+      <div class="field-group line-tp">
+        <div class="field-label">
+          <span>● TP Line (green)</span>
+          <span class="field-offset" id="tp-offset"></span>
+        </div>
+        <div class="input-row">
+          <span class="line-dot tp"></span>
+          <input type="number" id="inp-tp" placeholder="NIFTY target level" step="0.5">
+        </div>
+      </div>
+
+      <!-- Quick set by points -->
+      <div class="sb-label" style="margin-top:8px">Quick set from Entry</div>
+      <div class="offset-row">
+        <span>SL</span>
+        <input type="number" id="inp-sl-off" placeholder="-30" value="-30" step="5">
+        <span>pts</span>
+      </div>
+      <div class="offset-row" style="margin-top:4px">
+        <span>TP</span>
+        <input type="number" id="inp-tp-off" placeholder="+60" value="60" step="5">
+        <span>pts</span>
+      </div>
+      <button id="btn-apply-offsets" class="btn" style="margin-top:6px;background:var(--panel2);border:1px solid var(--border2);color:var(--text3);font-size:11px">Apply Offsets</button>
+    </div>
+
+    <!-- Controls -->
+    <div class="sb-section">
+      <div class="sb-label">Controls</div>
+      <button id="btn-arm" class="btn btn-arm">▶  ARM BOT</button>
+      <button id="btn-disarm" class="btn btn-disarm" style="display:none">■  DISARM</button>
+      <div class="btn-row">
+        <button id="btn-manual-buy" class="btn btn-buy" disabled>↑ BUY NOW</button>
+        <button id="btn-manual-exit" class="btn btn-exit" disabled>↓ EXIT</button>
+      </div>
+    </div>
+
+    <!-- Active trade card -->
+    <div class="sb-section" id="trade-card" style="display:none">
+      <div class="sb-label">Active Trade</div>
+      <div class="trade-card">
+        <div class="trade-row">
+          <span class="trade-key">Symbol</span>
+          <span class="trade-val" id="tc-instrument">—</span>
+        </div>
+        <div class="trade-row">
+          <span class="trade-key">Side</span>
+          <span class="trade-val" id="tc-side">—</span>
+        </div>
+        <div class="trade-row">
+          <span class="trade-key">Entry NIFTY</span>
+          <span class="trade-val" id="tc-entry">—</span>
+        </div>
+        <div class="trade-row">
+          <span class="trade-key">Current</span>
+          <span class="trade-val" id="tc-current">—</span>
+        </div>
+        <div class="trade-row">
+          <span class="trade-key">NIFTY P&amp;L</span>
+          <span class="trade-val" id="tc-pnl">—</span>
+        </div>
+        <div class="trade-row">
+          <span class="trade-key">SL</span>
+          <span class="trade-val" id="tc-sl" style="color:var(--red)">—</span>
+        </div>
+        <div class="trade-row">
+          <span class="trade-key">TP</span>
+          <span class="trade-val" id="tc-tp" style="color:var(--green)">—</span>
+        </div>
+        <div class="trade-row">
+          <span class="trade-key">Order ID</span>
+          <span class="trade-val" id="tc-oid" style="font-size:10px;color:var(--text2)">—</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Last trade -->
+    <div class="sb-section" id="last-trade-card" style="display:none">
+      <div class="sb-label">Last Trade</div>
+      <div class="trade-card">
+        <div class="trade-row">
+          <span class="trade-key">Symbol</span>
+          <span class="trade-val" id="lt-instrument">—</span>
+        </div>
+        <div class="trade-row">
+          <span class="trade-key">Reason</span>
+          <span class="trade-val" id="lt-reason">—</span>
+        </div>
+        <div class="trade-row">
+          <span class="trade-key">Entry</span>
+          <span class="trade-val" id="lt-entry">—</span>
+        </div>
+        <div class="trade-row">
+          <span class="trade-key">Exit</span>
+          <span class="trade-val" id="lt-exit">—</span>
+        </div>
+        <div class="trade-row">
+          <span class="trade-key">P&amp;L (pts)</span>
+          <span class="trade-val" id="lt-pnl">—</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Session stats -->
+    <div class="sb-section">
+      <div class="sb-label">Session</div>
+      <div class="stats-grid">
+        <div class="stat-box">
+          <div class="stat-val neutral" id="sess-pnl">0.00</div>
+          <div class="stat-key">P&amp;L pts</div>
+        </div>
+        <div class="stat-box">
+          <div class="stat-val neutral" id="sess-trades">0</div>
+          <div class="stat-key">Trades</div>
+        </div>
+        <div class="stat-box" style="grid-column:span 2">
+          <div class="stat-val neutral" id="sess-wr">—</div>
+          <div class="stat-key">Win Rate</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Enctoken -->
+    <div class="sb-section">
+      <div class="sb-label">Enctoken</div>
+      <div class="enc-row">
+        <input type="text" id="inp-enctoken" placeholder="paste enctoken…" autocomplete="off">
+        <button class="btn-enc" id="btn-save-enc">Save</button>
+      </div>
+      <div style="font-size:9px;color:var(--text2);margin-top:4px">From browser cookies at kite.zerodha.com</div>
+    </div>
+
+  </aside>
+
+  <!-- ══ MAIN AREA ═════════════════════════════════════════════════════════ -->
+  <section id="main">
+
+    <!-- Top bar -->
+    <div id="topbar">
+      <div>
+        <div class="nifty-label">NIFTY 50</div>
+        <div class="nifty-price" id="nifty-price">—</div>
+      </div>
+
+      <div class="ohlc-bar" id="ohlc-bar">
+        <span>O <b id="ohlc-o">—</b></span>
+        <span>H <b id="ohlc-h">—</b></span>
+        <span>L <b id="ohlc-l">—</b></span>
+        <span>C <b id="ohlc-c">—</b></span>
+      </div>
+
+      <div class="tf-buttons">
+        <button class="tf-btn active" data-tf="300">5m</button>
+        <button class="tf-btn" data-tf="600">10m</button>
+      </div>
+    </div>
+
+    <!-- Chart -->
+    <div id="chart-wrap">
+      <canvas id="chart"></canvas>
+      <div id="tooltip"></div>
+    </div>
+
+    <!-- Log panel -->
+    <div id="log-panel"></div>
+
+  </section>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
+<script src="/static/js/app.js"></script>
+</body>
+</html>
