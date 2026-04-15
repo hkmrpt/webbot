@@ -9,7 +9,7 @@ TRADING_MODE = "demo"          # "demo" | "real"
 ZERODHA_CONFIG = {
     "api_key":       "kitefront",
     "user_id":       "GIU182",
-    "enctoken":      "wCYp7YWu4%2B9rjprMLxpvKbzTY1xxBLLB7vZSAMfGVjc1jHBpH76kpUXvH0aD9CmA4ktRgM8F4%2Fk0m5CrfgKQrShzb5Qr36Kh1lbRmf1hpkqYKLwmpIx%2Bew%3D%3D",
+    "enctoken":      "2%2B6mrjlX42SB0FaWJws%2BmA3Cbreo38PUHR%2FeLYuWhdVIbGmxZH3GdjrG0kshgfJB9itLFNYKTjN4kxPXYq8VsfFVZbRDbo7LonBnYhlI4dL%2B9YRXLMopzg%3D%3D",
     "kf_session":    "RxKs57L99OglA1HaT9ELOkkWuo25xPIj",
     "public_token":  "OZKli4yNG5C5be5rneCwHrKEQ7ZtmBCm",
     "uid":           "1774325659463",
@@ -29,13 +29,11 @@ MAX_RISK_PER_TRADE  = 0.01
 # When AUTO_JUMP is True, JUMP_PCT is IGNORED.
 # dynamic_jump_pts = Nifty tick ATR  × JUMP_ATR_MULTIPLIER
 # Result is clamped to [JUMP_MIN_PTS, JUMP_MAX_PTS].
-AUTO_JUMP            = True         # True = ATR-based | False = fixed JUMP_PCT
-JUMP_ATR_WINDOW      = 30           # rolling tick window for Nifty ATR
-JUMP_ATR_MULTIPLIER  = 1.2          # ATR × this = spike threshold (fixed)
-JUMP_MIN_PTS         = 4.0          # minimum spike threshold (pts) — also adaptive floor when winning
-JUMP_MAX_PTS         = 20.0         # maximum spike threshold (pts)
-JUMP_ADAPTIVE_MIN    = 4.0          # adaptive floor when brain win rate is high (easier entry)
-JUMP_ADAPTIVE_MAX    = 7.0          # adaptive floor when brain win rate is low  (harder entry)
+AUTO_JUMP           = True         # True = ATR-based | False = fixed JUMP_PCT
+JUMP_ATR_WINDOW     = 30           # rolling tick window for Nifty ATR
+JUMP_ATR_MULTIPLIER = 1.2          # ATR × this = spike threshold
+JUMP_MIN_PTS        = 4.0          # minimum spike threshold (pts)
+JUMP_MAX_PTS        = 20.0         # maximum spike threshold (pts)
 
 # Legacy fixed threshold (used when AUTO_JUMP = False)
 JUMP_PCT            = 0.02         # % of Nifty price
@@ -123,10 +121,9 @@ TRADE_TIMEOUT_SECS        = 60     # seconds before timeout check
 TRADE_TIMEOUT_MIN_PROFIT  = 1.0    # % — exit if profit below this after timeout
 
 # ── Trade Controls ────────────────────────────────────────────
-SL_COOLDOWN_SECS     = 180
-SL_COOLDOWN_MAX_SECS = 1800   # hard cap — consecutive SL hits can't exceed this cooldown (30 min)
+SL_COOLDOWN_SECS    = 180
 BUY_QTY             = 1
-MAX_TRADES_DAY      = 15
+MAX_TRADES_DAY      = 30
 MAX_DAILY_LOSS      = 3000.0
 DAILY_PROFIT_TARGET = 60000.0
 
@@ -146,13 +143,6 @@ TRADE_END_M         = 20
 # ── Force exit before close ───────────────────────────────────
 FORCE_EXIT_H        = 15
 FORCE_EXIT_M        = 25
-
-# ── Range / Volatility Filter ─────────────────────────────────
-# Blocks entries when NIFTY high-low spread over the rolling window exceeds
-# RANGE_MAX_POINTS (market swinging too wildly — spike likely to reverse).
-RANGE_WINDOW        = 20     # rolling NIFTY tick window
-RANGE_MAX_POINTS    = 25.0   # max allowed spread (pts); above = block
-RANGE_MIN_TICKS     = 10     # min ticks before filter is active
 
 # ── Trade Log ─────────────────────────────────────────────────
 TRADE_LOG           = "trade_log.csv"

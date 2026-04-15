@@ -67,8 +67,6 @@ from config import (
     TRADING_MODE,
     AUTO_JUMP, JUMP_ATR_WINDOW, JUMP_ATR_MULTIPLIER,
     JUMP_MIN_PTS, JUMP_MAX_PTS,
-    JUMP_ADAPTIVE_MIN, JUMP_ADAPTIVE_MAX,
-    SL_COOLDOWN_MAX_SECS,
     NIFTY_REVERSAL_EXIT,
     FAST_MOVE_VELOCITY,
     BREAKEVEN_TRIGGER_PCT,
@@ -76,8 +74,6 @@ from config import (
 )
 from buy_exit_strategy import BuyExitStrategy
 from market_brain import MarketBrain
-from self_tuner import SelfTuner
-from volatility_detector import VolatilityDetector
 from zerodha_websocket import connect_zerodha_websocket
 from Zerodha_api import place_buy, place_sell
 
@@ -105,10 +101,8 @@ socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 # _state_lock guards S and RC mutations ONLY.
 # Never call socketio.emit, place_buy, place_sell, or any blocking I/O
 # while holding this lock.
-_state_lock   = threading.Lock()
-_market_brain = MarketBrain()        # AI entry brain — persists across trades via brain_state.json
-_self_tuner   = SelfTuner()          # self-learning parameter tuner — persists via tuner_state.json
-_vol_detector = VolatilityDetector() # pre-entry range filter — blocks entries when NIFTY swings too wide
+_state_lock  = threading.Lock()
+_market_brain = MarketBrain()   # AI entry brain — persists across trades via brain_state.json
 
 # Separate lock for the log buffer so logging never blocks trading state.
 _log_lock = threading.Lock()
@@ -155,9 +149,6 @@ RC = {
     "trade_end_m":            TRADE_END_M,
     "force_exit_h":           FORCE_EXIT_H,
     "force_exit_m":           FORCE_EXIT_M,
-    "sl_cooldown_max_secs":   SL_COOLDOWN_MAX_SECS,
-    "jump_adaptive_min":      JUMP_ADAPTIVE_MIN,
-    "jump_adaptive_max":      JUMP_ADAPTIVE_MAX,
 }
 
 # Params whose deque sizes are fixed at startup — they require a restart to
@@ -232,12 +223,9 @@ S = {
     "ws_loop":            None,
     "subscribed_tokens":  [],
 
-    "logs":                   [],
-    "live_trail_pct":         BUY_TRAIL_PCT,
-    "option_atr":             None,
-    "consecutive_sl_hits":    0,
-    "effective_jump_mult":    JUMP_ATR_MULTIPLIER,
-    "entry_params":           {},      # active param snapshot taken at trade entry
+    "logs":               [],
+    "live_trail_pct":     BUY_TRAIL_PCT,
+    "option_atr":         None,
 }
 
 
@@ -293,32 +281,16 @@ def _compute_option_atr(prices):
     return _compute_atr(prices)
 
 
-
-
-# ── Adaptive SL cooldown ──────────────────────────────────────────────────────
-def _adaptive_sl_cooldown() -> int:
-    """
-    Doubles base cooldown for each consecutive SL hit, capped at sl_cooldown_max_secs.
-    hits=1 → base, hits=2 → 2×base, hits=3 → 4×base, …
-    """
-    hits = S["consecutive_sl_hits"]
-    secs = RC["sl_cooldown_secs"] * (2 ** max(0, hits - 1))
-    return int(min(secs, RC["sl_cooldown_max_secs"]))
-
-
 # ── Auto jump threshold ───────────────────────────────────────────────────────
 def _update_jump_threshold(nifty_price):
-    atr  = _compute_atr(list(S["nifty_atr_ticks"]))
+    atr = _compute_atr(list(S["nifty_atr_ticks"]))
     S["jump_atr"] = atr
-
-    adaptive_floor           = _self_tuner.get("jump_floor")  # 4–7 pts, learned from trade outcomes
-    S["effective_jump_mult"] = adaptive_floor
 
     if RC["auto_jump"] and atr is not None:
         raw = atr * RC["jump_atr_multiplier"]
-        pts = round(max(adaptive_floor, min(RC["jump_max_pts"], raw)), 2)
+        pts = round(max(RC["jump_min_pts"], min(RC["jump_max_pts"], raw)), 2)
     else:
-        pts = round(nifty_price * RC["jump_pct"] / 100, 2) if nifty_price else adaptive_floor
+        pts = round(nifty_price * RC["jump_pct"] / 100, 2) if nifty_price else RC["jump_min_pts"]
 
     S["jump_threshold"]   = pts
     S["dynamic_jump_pts"] = pts
@@ -421,13 +393,15 @@ def _build_state_payload():
         "peak_profit":          snap.get("peak_profit"),
         "peak_profit_pct":      snap.get("peak_profit_pct"),
         "trail_price":          snap.get("trail_price"),
-        "trail_pct":            snap.get("trail_pct",     BUY_TRAIL_PCT),
-        "option_atr":           snap.get("option_atr",   S["option_atr"]),
-        "held_secs":            snap.get("held_secs",    0),
+        "trail_pct":            snap.get("trail_pct",         BUY_TRAIL_PCT),
+        "atr_trail_pct":        snap.get("atr_trail_pct",     BUY_TRAIL_PCT),
+        "profit_trail_pct":     snap.get("profit_trail_pct"),
+        "min_trail_pct_reached":snap.get("min_trail_pct_reached"),
+        "option_atr":           snap.get("option_atr",        S["option_atr"]),
+        "held_secs":            snap.get("held_secs", 0),
         "momentum_score":       snap.get("momentum_score"),
-        "exit_score":           snap.get("exit_score",   0.0),
+        "move_type":            snap.get("move_type"),
         "breakeven_moved":      snap.get("breakeven_moved", False),
-        "exit_brain":           snap.get("brain",        {}),
 
         "jump_pct":             RC["jump_pct"],
         "sl_pct_p1":            RC["sl_phase1_pct"],
@@ -454,9 +428,6 @@ def _build_state_payload():
         "ai_entry_score":       S.get("ai_entry_score"),
         "ai_regime":            S.get("ai_regime", "unknown"),
         "ai_brain":             _market_brain.state,
-        "consecutive_sl_hits":  S["consecutive_sl_hits"],
-        "adaptive_min_pts":     S["effective_jump_mult"],
-        "tuner":                _self_tuner.state,
 
         # New config constants for UI display
         "breakeven_trigger_pct": BREAKEVEN_TRIGGER_PCT,
@@ -541,7 +512,6 @@ def process_ticks(ticks):
                 S["nifty_price"] = price
                 S["nifty_ticks"].append(price)
                 S["nifty_atr_ticks"].append(price)
-                _vol_detector.add(price)
                 S["regression_slope"] = _regression_slope(list(S["nifty_ticks"]))
                 _update_jump_threshold(price)
 
@@ -554,9 +524,8 @@ def process_ticks(ticks):
                     S["wins"]             = 0
                     S["losses"]           = 0
                     S["trade_pnl"]        = 0.0
-                    S["cooldown_until"]      = None
-                    S["last_skip_reason"]    = None
-                    S["consecutive_sl_hits"] = 0
+                    S["cooldown_until"]   = None
+                    S["last_skip_reason"] = None
                     with _log_lock:
                         S["logs"] = []   # clear log buffer for new day
                     daily_reset_fired = True
@@ -614,15 +583,7 @@ def process_ticks(ticks):
                                 log_entries.extend(closed.get("logs", []))
 
                     if not trade_closed_payload:
-                        elapsed = (
-                            (datetime.now() - S["trade_open_time"]).total_seconds()
-                            if S["trade_open_time"] else 0.0
-                        )
-                        exit_result = S["exit_engine"].on_price(
-                            aslot["price"],
-                            elapsed=elapsed,
-                            regime=S.get("ai_regime", "unknown"),
-                        )
+                        exit_result = S["exit_engine"].on_price(aslot["price"])
                         if exit_result:
                             closed = _on_trade_closed_state(exit_result)
                             trade_closed_payload = closed.get("trade_closed_payload")
@@ -673,7 +634,7 @@ def _regression_confirms(side):
     slope = S["regression_slope"]
     if slope is None:
         return True
-    mn = _self_tuner.get("slope_min")   # learned minimum slope (default 0.3)
+    mn = RC["regression_slope_min"]
     return slope >= mn if side == "CE" else slope <= -mn
 
 
@@ -775,14 +736,6 @@ def _check_spike(current):
         S["last_skip_reason"] = f"Slope {slope:+.3f} — against trend"
         return None
 
-    if not _vol_detector.is_ranging():
-        info = _vol_detector.range_info()
-        S["last_skip_reason"] = (
-            f"Volatility filter: NIFTY range {info['spread']:.1f}pts "
-            f"exceeds limit — spike likely to reverse"
-        )
-        return None
-
     S["last_skip_reason"] = None
 
     adaptive_ticks      = _adaptive_confirm_ticks(side)
@@ -882,9 +835,6 @@ def _enter_trade_state(side, nifty_price):
         seed_prices=seed,
     )
 
-    # Snapshot active parameters so the tuner can learn from this trade's outcome
-    S["entry_params"] = _self_tuner.snapshot_entry(S, RC)
-
     S["trade_open"]         = True
     S["trade_side"]         = side
     S["active_side"]        = side
@@ -953,19 +903,24 @@ def _on_trade_closed_state(result):
     side            = result["side"]
     pnl             = result["pnl"]
     reason          = result["reason"]
-    sl_pct_used    = result.get("sl_pct",        RC["sl_phase1_pct"])
-    trail_pct_used = result.get("trail_pct",     BUY_TRAIL_PCT)
-    atr_at_exit    = result.get("option_atr")
-    peak_pct       = result.get("peak_profit_pct", 0)
+    sl_pct_used     = result.get("sl_pct",        RC["sl_phase1_pct"])
+    trail_pct_used  = result.get("trail_pct",      BUY_TRAIL_PCT)
+    atr_trail_used  = result.get("atr_trail_pct",  BUY_TRAIL_PCT)
+    prof_trail_used = result.get("profit_trail_pct")
+    min_trail       = result.get("min_trail_pct_reached")
+    atr_at_exit     = result.get("option_atr")
+    peak_pct        = result.get("peak_profit_pct", 0)
+
+    trail_label = f"trail={trail_pct_used}% (min_reached={min_trail}%)"
+    if prof_trail_used is not None:
+        trail_label += f" [ATR={atr_trail_used}% / Profit={prof_trail_used}%]"
 
     reason_label = {
-        "sl":             f"SL hit ({sl_pct_used}%)",
-        "trail":          f"Trail exit (trail={trail_pct_used}%  atr={atr_at_exit})",
-        "timeout":        "Timeout (hard safety — held too long, low profit)",
-        "ai_exit":        "AI exit (ExitBrain policy triggered)",
-        "nifty_reversal": "NIFTY reversal exit",
-        "manual":         "Manual exit (button)",
-        "force_exit":     "Force-exit (market close)",
+        "sl":         f"SL hit ({sl_pct_used}%)",
+        "trail":      f"Trail exit ({trail_label}  atr={atr_at_exit})",
+        "timeout":    f"Timeout (>{RC['trade_timeout_secs']}s)",
+        "manual":     "Manual exit (button)",
+        "force_exit": "Force-exit (market close)",
     }.get(reason, reason)
 
     color = "success" if pnl >= 0 else "error"
@@ -991,7 +946,8 @@ def _on_trade_closed_state(result):
     S["nifty_entry_price"]  = None
     S["last_exit_order_id"] = None
 
-    # Teach the AI brain from this trade's outcome
+    # Teach the AI brain from this trade's outcome (runs outside of lock later,
+    # but mutation is on the brain's internal state only — safe to call here)
     _market_brain.on_trade_closed(result)
     brain = _market_brain.state
     logs.append((
@@ -1002,33 +958,13 @@ def _on_trade_closed_state(result):
         "info",
     ))
 
-    # Self-tuner: learn entry gate parameters from this trade's outcome
-    _self_tuner.on_trade_closed(result, S.get("entry_params", {}))
-    _self_tuner.apply_to_rc(RC)
-    if _self_tuner.ready:
-        t = _self_tuner.state["learned"]
-        logs.append((
-            f"[Tuner] confirms={t['confirm_ticks']:.1f}  "
-            f"jump_floor={t['jump_floor']}pts  slope_min={t['slope_min']}",
-            "info",
-        ))
-
     if pnl >= 0:
         S["wins"] += 1
-        S["consecutive_sl_hits"] = 0   # winning trade resets the streak
     else:
         S["losses"] += 1
         if reason == "sl":
-            S["consecutive_sl_hits"] += 1
-            cd = _adaptive_sl_cooldown()
-            S["cooldown_until"] = datetime.now() + timedelta(seconds=cd)
-            logs.append((
-                f"⏳ SL cooldown — {cd}s "
-                f"(hit #{S['consecutive_sl_hits']}, base={RC['sl_cooldown_secs']}s)",
-                "warning",
-            ))
-        else:
-            S["consecutive_sl_hits"] = 0   # non-SL loss resets streak
+            S["cooldown_until"] = datetime.now() + timedelta(seconds=RC["sl_cooldown_secs"])
+            logs.append((f"⏳ SL cooldown — no entries for {RC['sl_cooldown_secs']}s", "warning"))
 
     logs.append((
         f"Detector reset ₹{S['nifty_price']:.2f}  |  "
@@ -1222,17 +1158,9 @@ def _write_enctoken(new_enctoken: str):
 @socketio.on("connect")
 def on_connect():
     with _state_lock:
-        today = datetime.now().date()
-        if today != S["trading_date"]:
-            S["trading_date"]     = today
-            S["session_pnl"]      = 0.0
-            S["trades_today"]     = 0
-            S["wins"]             = 0
-            S["losses"]           = 0
-            S["trade_pnl"]        = 0.0
-            S["cooldown_until"]   = None
-            S["last_skip_reason"] = None
         payload = _build_state_payload()
+        with _log_lock:
+            payload["logs"] = list(S["logs"])[-50:]
     emit("state", payload)
 
 
@@ -1560,7 +1488,6 @@ def index():
 @app.route("/settings")
 def settings():
     return send_file("buy_settings.html")
-
 
 
 if __name__ == "__main__":

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
-<title>Option Buy Robot v8.3</title>
+<title>Option Buy Robot v8.2</title>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet"/>
 <link rel="stylesheet" href="/static/css/buy_index.css"/>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
@@ -22,7 +22,7 @@
   <div class="brand">
     <div class="brand-logo">⚡</div>
     Buy Bot
-    <span class="v-badge">v8.3</span>
+    <span class="v-badge">v8.2</span>
   </div>
   <div class="sides-bar" id="topSidesBar" style="margin-right:10px;"></div>
   <div class="ticker-strip">
@@ -188,7 +188,7 @@
 
     <!-- AI Brain -->
     <div class="ss">
-      <div class="ss-lbl">Entry AI</div>
+      <div class="ss-lbl">AI Brain</div>
       <div class="ai-regime-row">
         <span class="ai-regime-badge unknown" id="aiRegimeBadge">unknown</span>
         <div class="ai-score-wrap">
@@ -199,8 +199,8 @@
         </div>
       </div>
       <div class="ai-row"><span class="ai-k">Trades learned</span><span class="ai-v" id="aiBrainTrades">0</span></div>
-      <div class="ai-row"><span class="ai-k">Win rate</span><span class="ai-v g" id="aiBrainWR">--</span></div>
-      <div class="ai-row"><span class="ai-k">Entry model</span><span class="ai-v" id="aiBrainReady"><span class="ai-ready-dot off"></span> Learning…</span></div>
+      <div class="ai-row"><span class="ai-k">AI win rate</span><span class="ai-v g" id="aiBrainWR">--</span></div>
+      <div class="ai-row"><span class="ai-k">Model ready</span><span class="ai-v" id="aiBrainReady"><span class="ai-ready-dot off"></span> Learning…</span></div>
       <div class="ai-momentum-wrap">
         <span class="ai-k">Momentum</span>
         <div class="momentum-track">
@@ -208,31 +208,6 @@
         </div>
         <span class="momentum-lbl" id="momentumLbl">--</span>
       </div>
-    </div>
-
-    <!-- Exit AI -->
-    <div class="ss">
-      <div class="ss-lbl">Exit AI</div>
-      <div class="ai-row"><span class="ai-k">Exit model</span><span class="ai-v" id="exitBrainReady"><span class="ai-ready-dot off"></span> Learning…</span></div>
-      <div class="ai-row"><span class="ai-k">Ticks / Trades</span><span class="ai-v" id="exitBrainStats">-- / --</span></div>
-      <div class="ai-row"><span class="ai-k">Exit threshold</span><span class="ai-v" id="exitBrainThreshold">0.55</span></div>
-      <div class="ai-momentum-wrap">
-        <span class="ai-k">Exit score</span>
-        <div class="momentum-track">
-          <div class="momentum-fill" id="exitScoreFill" style="width:0%"></div>
-        </div>
-        <span class="momentum-lbl" id="exitScoreLbl">--</span>
-      </div>
-    </div>
-
-    <!-- Self-Tuner -->
-    <div class="ss">
-      <div class="ss-lbl">Self-Tuner</div>
-      <div class="ai-row"><span class="ai-k">Tuner ready</span><span class="ai-v" id="tunerReady"><span class="ai-ready-dot off"></span> Learning…</span></div>
-      <div class="ai-row"><span class="ai-k">Trades seen</span><span class="ai-v" id="tunerTrades">0</span></div>
-      <div class="ai-row"><span class="ai-k">Confirm ticks</span><span class="ai-v c" id="tunerConfirm">--</span></div>
-      <div class="ai-row"><span class="ai-k">Jump floor (pts)</span><span class="ai-v c" id="tunerJump">--</span></div>
-      <div class="ai-row"><span class="ai-k">Slope min</span><span class="ai-v c" id="tunerSlope">--</span></div>
     </div>
 
     <!-- Filters -->
@@ -243,7 +218,8 @@
       <div class="filter-row"><span class="filter-name">Regression window</span><span class="fval fv-ok" id="fvReg">--</span></div>
       <div class="filter-row"><span class="filter-name">Stop loss (tiered)</span><span class="fval fv-warn" id="fvSL">--</span></div>
       <div class="filter-row"><span class="filter-name">SL phase 1 secs</span><span class="fval fv-ok" id="fvSLsecs">--</span></div>
-      <div class="filter-row"><span class="filter-name">Trail % (ATR-based)</span><span class="fval fv-ok" id="fvTrail">--</span></div>
+      <div class="filter-row"><span class="filter-name">Trail % (ATR+Profit-Tier)</span><span class="fval fv-ok" id="fvTrail">--</span></div>
+      <div class="filter-row"><span class="filter-name">Profit-tier threshold</span><span class="fval fv-ok" id="fvProfitThreshold">≥5%</span></div>
       <div class="filter-row"><span class="filter-name">Trail ATR thresholds</span><span class="fval fv-ok" id="fvTrailAtr">--</span></div>
       <div class="filter-row">
         <span class="filter-name">Spike threshold</span>
@@ -261,7 +237,7 @@
       <div class="filter-row"><span class="filter-name">AI score threshold</span><span class="fval fv-ok" id="fvAiThreshold">0.42</span></div>
       <div class="filter-row"><span class="filter-name">Breakeven trigger</span><span class="fval fv-ok" id="fvBreakeven">--</span></div>
       <div class="filter-row"><span class="filter-name">NIFTY reversal exit</span><span class="fval fv-ok" id="fvNiftyReversal">ON</span></div>
-      <div class="filter-row"><span class="filter-name">SL hit streak</span><span class="fval fv-warn" id="fvSlStreak">0</span></div>
+      <div class="filter-row"><span class="filter-name">Move velocity thr</span><span class="fval fv-ok" id="fvMoveVelocity">--</span></div>
     </div>
 
     <!-- Active trade card -->
@@ -282,13 +258,25 @@
           <span class="lk">Trail Price <span style="color:var(--text3)" id="tcTrPct">(25%)</span></span>
           <span class="lv y" id="tcTrail">--</span>
         </div>
-        <div class="lr" id="tcExitScoreRow" style="display:none">
-          <span class="lk">AI Exit Score</span>
-          <span class="lv" id="tcExitScore">--</span>
+        <div class="lr" id="tcAtrRow" style="display:none">
+          <span class="lk">ATR Trail %</span>
+          <span class="lv y" id="tcAtrTrail">--</span>
+        </div>
+        <div class="profit-trail-row" id="tcProfitTrailRow">
+          <span class="pt-k">🔒 Profit Trail</span>
+          <span class="pt-v" id="tcProfitTrail">--</span>
+        </div>
+        <div class="ratchet-row" id="tcRatchetRow">
+          <span class="ra-k">↘ Min Trail Reached</span>
+          <span class="ra-v" id="tcMinTrail">--</span>
         </div>
         <div class="lr" id="tcBreakevenRow" style="display:none">
           <span class="lk">Breakeven</span>
           <span class="lv g" id="tcBreakeven">--</span>
+        </div>
+        <div class="lr" id="tcMoveTypeRow" style="display:none">
+          <span class="lk">Move Type</span>
+          <span class="lv" id="tcMoveType">--</span>
         </div>
         <div class="lr" id="tcMomentumRow" style="display:none">
           <span class="lk">Momentum</span>

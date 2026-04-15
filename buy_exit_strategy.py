@@ -1,17 +1,19 @@
 """
-buy_exit_strategy.py  ──  Option Buy Robot v8.3
+buy_exit_strategy.py  ──  Option Buy Robot v8.2
 ════════════════════════════════════════════════
 
-Simplified exit engine driven by self-learning ExitBrain.
-
-Three exit layers (in priority order):
-  1. Hard SL     — ATR-phase stop loss (safety net, never removed)
-  2. Trail stop  — ATR-based high-water mark trail (profit protection)
-  3. AI exit     — ExitBrain per-tick policy (self-learning, data-driven)
-
-Hard timeout (120s with < 1% profit) kept as absolute fallback only.
-All complex rule-based trails (time trail, profit tier, move-type logic)
-removed — the ExitBrain learns these patterns from data instead.
+Trail logic:
+  - ATR trail:      linear interpolation ATR_LOW/HIGH → PCT_LOW/HIGH
+  - Profit tier:    PROPORTIONAL — small profit = tight trail, large profit = wider trail
+                    activates once PEAK profit ≥ threshold
+  - Time trail:     starts at TRAIL_TIME_START_PCT, tightens by TRAIL_TIME_TIGHTEN_STEP
+                    every TRAIL_TIME_TIGHTEN_SECS after profit threshold hit
+  - Combined:       min(atr_trail, tier_trail, time_trail)
+  - Ratchet:        disabled — trail widens intentionally as profit grows
+  - Trail price:    high-water mark, never goes backward
+  - Floor:          trail price always ≥ entry price
+  - Breakeven:      SL moved to entry once peak profit ≥ BREAKEVEN_TRIGGER_PCT
+  - Profit-lock SL: SL stepped above entry at key profit milestones (PROFIT_LOCK_TIERS)
 """
 
 import csv
@@ -20,16 +22,24 @@ import threading
 from collections import deque
 from datetime import datetime
 
-from exit_brain import ExitBrain, MAX_HOLD_SECS
+from exit_brain import ExitBrain
 from config import (
-    BUY_QTY, BUY_TRAIL_PCT, LOT_SIZE,
+    BUY_QTY, BUY_SL_PCT, BUY_TRAIL_PCT, LOT_SIZE,
     OPTION_ATR_PERIOD,
+    PROFIT_TIER_TRAIL, PROFIT_TRAIL_THRESHOLD_PCT,
     PROFIT_LOCK_TIERS,
-    TRADE_LOG,
+    TRADE_LOG, TRADE_TIMEOUT_MIN_PROFIT, TRADE_TIMEOUT_SECS,
     TRAIL_ATR_HIGH, TRAIL_ATR_LOW,
     TRAIL_PCT_HIGH, TRAIL_PCT_LOW,
+    TRAIL_RATCHET_ENABLED,
     BREAKEVEN_TRIGGER_PCT,
+    TRAIL_TIME_START_PCT, TRAIL_TIME_TIGHTEN_SECS,
+    TRAIL_TIME_TIGHTEN_STEP, TRAIL_TIME_MIN_PCT,
     SL_PHASE1_PCT, SL_PHASE1_SECS, SL_PHASE2_PCT,
+    MOVE_VELOCITY_WINDOW, FAST_MOVE_VELOCITY,
+    SLOW_MOVE_TRAIL_CAP, FAST_MOVE_TRAIL_FLOOR,
+    SLOW_MOVE_TIMEOUT_SECS, SLOW_MOVE_MIN_PROFIT,
+    FAST_MOVE_TIMEOUT_SECS, FAST_MOVE_MIN_PROFIT,
 )
 
 _csv_lock = threading.Lock()
@@ -40,8 +50,11 @@ CSV_FIELDS = [
     "pnl", "pnl_pct",
     "reason",
     "sl_pct", "trail_pct",
+    "atr_trail_pct", "profit_trail_pct",
+    "min_trail_pct_reached",
     "option_atr",
-    "peak_profit", "peak_profit_pct",
+    "peak_profit",
+    "peak_profit_pct",
     "held_secs",
     "equity_after",
 ]
@@ -49,29 +62,33 @@ CSV_FIELDS = [
 
 def write_trade_csv(result: dict):
     """Append one trade row to TRADE_LOG. Thread-safe."""
-    now = datetime.now()
-    row = {
-        "date":            now.strftime("%Y-%m-%d"),
-        "time":            now.strftime("%H:%M:%S"),
-        "side":            result.get("side",            ""),
-        "entry":           result.get("entry",           ""),
-        "exit_price":      result.get("exit_price",      ""),
-        "qty":             result.get("qty",             ""),
-        "lot_qty":         (result.get("qty", 0) or 0) * LOT_SIZE,
-        "pnl":             result.get("pnl",             ""),
-        "pnl_pct":         result.get("pnl_pct",         ""),
-        "reason":          result.get("reason",          ""),
-        "sl_pct":          result.get("sl_pct",          ""),
-        "trail_pct":       result.get("trail_pct",       ""),
-        "option_atr":      result.get("option_atr",      ""),
-        "peak_profit":     result.get("peak_profit",     ""),
-        "peak_profit_pct": result.get("peak_profit_pct", ""),
-        "held_secs":       result.get("held_secs",       ""),
-        "equity_after":    result.get("equity_after",    ""),
+    path = TRADE_LOG
+    now  = datetime.now()
+    row  = {
+        "date":                 now.strftime("%Y-%m-%d"),
+        "time":                 now.strftime("%H:%M:%S"),
+        "side":                 result.get("side",             ""),
+        "entry":                result.get("entry",            ""),
+        "exit_price":           result.get("exit_price",       ""),
+        "qty":                  result.get("qty",              ""),
+        "lot_qty":              (result.get("qty", 0) or 0) * LOT_SIZE,
+        "pnl":                  result.get("pnl",              ""),
+        "pnl_pct":              result.get("pnl_pct",          ""),
+        "reason":               result.get("reason",           ""),
+        "sl_pct":               result.get("sl_pct",           ""),
+        "trail_pct":            result.get("trail_pct",        ""),
+        "atr_trail_pct":        result.get("atr_trail_pct",    ""),
+        "profit_trail_pct":     result.get("profit_trail_pct", ""),
+        "min_trail_pct_reached":result.get("min_trail_pct_reached", ""),
+        "option_atr":           result.get("option_atr",       ""),
+        "peak_profit":          result.get("peak_profit",      ""),
+        "peak_profit_pct":      result.get("peak_profit_pct",  ""),
+        "held_secs":            result.get("held_secs",        ""),
+        "equity_after":         result.get("equity_after",     ""),
     }
     with _csv_lock:
-        is_new = not os.path.exists(TRADE_LOG) or os.path.getsize(TRADE_LOG) == 0
-        with open(TRADE_LOG, "a", newline="") as f:
+        is_new = not os.path.exists(path) or os.path.getsize(path) == 0
+        with open(path, "a", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
             if is_new:
                 writer.writeheader()
@@ -79,7 +96,6 @@ def write_trade_csv(result: dict):
 
 
 # ── ATR helpers ───────────────────────────────────────────────────────────────
-
 def _compute_option_atr(prices: list) -> float | None:
     if len(prices) < 2:
         return None
@@ -87,41 +103,97 @@ def _compute_option_atr(prices: list) -> float | None:
     return round(sum(trs) / len(trs), 3)
 
 
-def _atr_to_trail_pct(atr: float | None) -> float:
-    """Linear interpolation: option ATR → trail %."""
+def _atr_to_trail_pct(atr: float | None, override: float | None = None) -> float:
+    """Linear interpolation: ATR → trail %. Override sets a floor."""
     if atr is None:
-        return BUY_TRAIL_PCT
+        return round(override if override is not None else BUY_TRAIL_PCT, 1)
+
     if atr >= TRAIL_ATR_HIGH:
-        return TRAIL_PCT_HIGH
-    if atr <= TRAIL_ATR_LOW:
-        return TRAIL_PCT_LOW
-    t = (atr - TRAIL_ATR_LOW) / (TRAIL_ATR_HIGH - TRAIL_ATR_LOW)
-    return round(TRAIL_PCT_LOW + t * (TRAIL_PCT_HIGH - TRAIL_PCT_LOW), 1)
+        atr_pct = TRAIL_PCT_HIGH
+    elif atr <= TRAIL_ATR_LOW:
+        atr_pct = TRAIL_PCT_LOW
+    else:
+        t       = (atr - TRAIL_ATR_LOW) / (TRAIL_ATR_HIGH - TRAIL_ATR_LOW)
+        atr_pct = TRAIL_PCT_LOW + t * (TRAIL_PCT_HIGH - TRAIL_PCT_LOW)
+
+    if override is not None:
+        return round(max(atr_pct, override), 1)
+    return round(atr_pct, 1)
 
 
-# ── Strategy ──────────────────────────────────────────────────────────────────
+def _time_to_trail_pct(held_secs: float, peak_profit_pct: float) -> float | None:
+    """
+    Time-based trail: activates once peak profit >= threshold.
+    Starts at TRAIL_TIME_START_PCT, tightens by TRAIL_TIME_TIGHTEN_STEP
+    every TRAIL_TIME_TIGHTEN_SECS. Floor at TRAIL_TIME_MIN_PCT.
+    Returns None if profit below threshold (not yet active).
+    """
+    if peak_profit_pct < PROFIT_TRAIL_THRESHOLD_PCT:
+        return None
+    intervals = int(held_secs // TRAIL_TIME_TIGHTEN_SECS)
+    trail     = TRAIL_TIME_START_PCT - (intervals * TRAIL_TIME_TIGHTEN_STEP)
+    return round(max(trail, TRAIL_TIME_MIN_PCT), 1)
 
+
+def _profit_to_trail_pct(peak_profit_pct: float) -> float | None:
+    """
+    Uses PEAK profit%, not current.
+    Returns None if profit below threshold; otherwise returns tier trail%.
+    """
+    if peak_profit_pct < PROFIT_TRAIL_THRESHOLD_PCT:
+        return None
+
+    tiers = sorted(PROFIT_TIER_TRAIL, key=lambda x: x[0], reverse=True)
+    for (min_pct, trail) in tiers:
+        if peak_profit_pct >= min_pct:
+            return float(trail)
+
+    if tiers:
+        return float(min(tiers, key=lambda x: x[0])[1])
+    return None
+
+
+# ── Move classifier ───────────────────────────────────────────────────────────
+def _classify_move(prices: deque, window: int) -> str:
+    """
+    Returns 'fast' if avg absolute pts/tick over last `window` ticks
+    is >= FAST_MOVE_VELOCITY, else 'slow'.
+    """
+    lst = list(prices)
+    if len(lst) < 2:
+        return "slow"
+    recent  = lst[-min(window + 1, len(lst)):]
+    changes = [abs(recent[i] - recent[i - 1]) for i in range(1, len(recent))]
+    avg_vel = sum(changes) / len(changes)
+    return "fast" if avg_vel >= FAST_MOVE_VELOCITY else "slow"
+
+
+# ── Strategy class ────────────────────────────────────────────────────────────
 class BuyExitStrategy:
 
     def __init__(self, capital: float):
-        self.capital         = capital
-        self._leg            = None
-        self._open_time      = None
-        self._opt_price_hist = deque(maxlen=OPTION_ATR_PERIOD + 1)
-        self._brain          = ExitBrain()   # persists weights across trades
+        self.capital             = capital
+        self._leg                = None
+        self._open_time          = None
+        self._opt_price_hist     = deque(maxlen=OPTION_ATR_PERIOD + 1)
+        self._trail_pct_override = None
+        self._brain              = ExitBrain()   # AI brain — persists across trades
 
     def open_leg(
         self,
-        side:            str,
-        entry_price:     float,
-        sl_pct_override: float | None = None,
-        seed_prices:     list  | None = None,
+        side:               str,
+        entry_price:        float,
+        sl_pct_override:    float | None = None,
+        trail_pct_override: float | None = None,
+        seed_prices:        list  | None = None,
         **_kwargs,
     ) -> dict:
         sl_pct = sl_pct_override if sl_pct_override is not None else SL_PHASE1_PCT
         sl     = round(entry_price * (1 - sl_pct / 100), 2)
 
-        self._brain.reset()   # clear tick buffer + momentum for new trade
+        self._trail_pct_override = trail_pct_override
+        init_trail = trail_pct_override if trail_pct_override is not None else BUY_TRAIL_PCT
+
         self._opt_price_hist = deque(maxlen=OPTION_ATR_PERIOD + 1)
         if seed_prices:
             for p in seed_prices[-(OPTION_ATR_PERIOD + 1):]:
@@ -129,39 +201,46 @@ class BuyExitStrategy:
         self._opt_price_hist.append(entry_price)
 
         self._leg = {
-            "side":            side,
-            "entry":           entry_price,
-            "qty":             BUY_QTY,
-            "sl":              sl,
-            "sl_pct":          sl_pct,
-            "trail_pct":       BUY_TRAIL_PCT,
-            "option_atr":      None,
-            "peak_price":      entry_price,
-            "peak_profit":     0.0,
-            "peak_profit_pct": 0.0,
-            "trail_price":     None,
-            "phase2":          False,
-            "breakeven_moved": False,
-            "momentum_score":  0.5,
-            "exit_score":      0.0,
-            "open":            True,
+            "side":                 side,
+            "entry":                entry_price,
+            "qty":                  BUY_QTY,
+            "sl":                   sl,
+            "sl_pct":               sl_pct,
+            "trail_pct":            init_trail,
+            "atr_trail_pct":        init_trail,
+            "profit_trail_pct":     None,
+            "time_trail_pct":       None,
+            "min_trail_pct_reached":init_trail,
+            "option_atr":           None,
+            "peak_price":           entry_price,
+            "peak_profit":          0.0,
+            "peak_profit_pct":      0.0,
+            "trail_price":          None,
+            "phase2":               False,
+            "breakeven_moved":      False,
+            "move_type":            "slow",
+            "open":                 True,
         }
         self._open_time = datetime.now()
-        return {"sl": sl, "qty": BUY_QTY, "sl_pct": sl_pct, "trail_pct": BUY_TRAIL_PCT}
 
-    def on_price(self, price: float, elapsed: float = 0.0, regime: str = "unknown"):
+        return {"sl": sl, "qty": BUY_QTY, "sl_pct": sl_pct, "trail_pct": init_trail}
+
+    def on_price(self, price: float):
         if not self._leg or not self._leg["open"]:
             return None
 
         leg      = self._leg
         qty_full = leg["qty"] * LOT_SIZE
+        elapsed  = (datetime.now() - self._open_time).total_seconds() if self._open_time else 0
 
-        # ── Update price history + ATR ────────────────────────────────────────
         self._opt_price_hist.append(price)
-        atr              = _compute_option_atr(list(self._opt_price_hist))
+
+        atr               = _compute_option_atr(list(self._opt_price_hist))
         leg["option_atr"] = atr
 
-        # ── Track peak ────────────────────────────────────────────────────────
+        atr_trail            = _atr_to_trail_pct(atr, self._trail_pct_override)
+        leg["atr_trail_pct"] = atr_trail
+
         if price > leg["peak_price"]:
             leg["peak_price"]      = price
             leg["peak_profit"]     = round((price - leg["entry"]) * qty_full, 2)
@@ -170,7 +249,7 @@ class BuyExitStrategy:
         if not leg["phase2"] and price > leg["entry"]:
             leg["phase2"] = True
 
-        # ── Phase SL tightening (15% → 8% after 30s) ─────────────────────────
+        # Tighten SL after phase 1 period
         if elapsed >= SL_PHASE1_SECS and leg["sl_pct"] > SL_PHASE2_PCT:
             new_sl = round(leg["entry"] * (1 - SL_PHASE2_PCT / 100), 2)
             if new_sl > leg["sl"]:
@@ -179,49 +258,79 @@ class BuyExitStrategy:
 
         peak_pct = leg["peak_profit_pct"]
 
-        # ── Breakeven ─────────────────────────────────────────────────────────
+        # Breakeven: move SL to entry once peak profit hits threshold
         if not leg["breakeven_moved"] and peak_pct >= BREAKEVEN_TRIGGER_PCT:
-            leg["sl"]             = max(leg["sl"], leg["entry"])
+            if leg["entry"] > leg["sl"]:
+                leg["sl"] = leg["entry"]
             leg["breakeven_moved"] = True
 
-        # ── Profit-lock SL (steps SL above entry at milestones) ───────────────
+        # Profit-lock SL: step SL above entry to lock in profit at key milestones
         if PROFIT_LOCK_TIERS:
-            for min_pct, lock_pct in sorted(PROFIT_LOCK_TIERS, key=lambda x: x[0], reverse=True):
+            tiers = sorted(PROFIT_LOCK_TIERS, key=lambda x: x[0], reverse=True)
+            for (min_pct, lock_pct) in tiers:
                 if peak_pct >= min_pct:
-                    locked = round(leg["entry"] * (1 + lock_pct / 100), 2)
-                    leg["sl"] = max(leg["sl"], locked)
+                    locked_sl = round(leg["entry"] * (1 + lock_pct / 100), 2)
+                    if locked_sl > leg["sl"]:
+                        leg["sl"] = locked_sl
                     break
 
-        # ── ATR-based trail stop (high-water mark) ────────────────────────────
-        trail_pct        = _atr_to_trail_pct(atr)
-        leg["trail_pct"] = trail_pct
+        # ── AI Brain: momentum score ────────────────────────────────────────
+        momentum_score       = self._brain.score(self._opt_price_hist)
+        leg["momentum_score"] = momentum_score
+
+        current_pct = (price - leg["entry"]) / leg["entry"] * 100
+        self._brain.update_profit(current_pct)
+
+        # Legacy move-type label (informational — brain drives the actual trail)
+        move_type        = _classify_move(self._opt_price_hist, MOVE_VELOCITY_WINDOW)
+        leg["move_type"] = move_type
+
+        # Three trail sources
+        p_trail                 = _profit_to_trail_pct(peak_pct)
+        t_trail                 = _time_to_trail_pct(elapsed, peak_pct)
+        leg["profit_trail_pct"] = p_trail
+        leg["time_trail_pct"]   = t_trail
+
+        candidates = [atr_trail]
+        if p_trail is not None:
+            candidates.append(p_trail)
+        if t_trail is not None:
+            candidates.append(t_trail)
+        combined = round(min(candidates), 1)
+
+        if TRAIL_RATCHET_ENABLED:
+            combined = round(min(combined, leg["min_trail_pct_reached"]), 1)
+            leg["min_trail_pct_reached"] = combined
+
+        # ── AI Brain: adaptive trail ────────────────────────────────────────
+        # Brain uses momentum score + self-learned multiplier to widen/tighten.
+        # High momentum → wider trail (let it run).
+        # Low momentum  → tight trail (protect gains fast).
+        combined         = self._brain.adaptive_trail(combined, momentum_score)
+        leg["trail_pct"] = combined
 
         if leg["phase2"]:
-            raw_trail  = leg["peak_price"] * (1 - trail_pct / 100)
+            raw_trail  = leg["peak_price"] * (1 - leg["trail_pct"] / 100)
             new_trail  = round(max(raw_trail, leg["entry"]), 2)
             prev_trail = leg["trail_price"] or leg["entry"]
             leg["trail_price"] = max(new_trail, prev_trail)
 
-        # ── Build ExitBrain state + record this tick ──────────────────────────
-        state = self._brain.build_state(
-            price, leg["entry"], leg["peak_price"],
-            elapsed, atr, regime, self._opt_price_hist,
-        )
-        leg["momentum_score"] = state[2]   # momentum is feature index 2
-        leg["exit_score"]     = self._brain.exit_score(state)
-        self._brain.record(state, price)
+        # Exit checks
+        # Timeout: brain adapts threshold based on move speed
+        timeout_secs   = FAST_MOVE_TIMEOUT_SECS if move_type == "fast" else SLOW_MOVE_TIMEOUT_SECS
+        min_profit_pct = FAST_MOVE_MIN_PROFIT    if move_type == "fast" else SLOW_MOVE_MIN_PROFIT
 
-        current_pct = (price - leg["entry"]) / leg["entry"] * 100
-
-        # ── Exit checks ───────────────────────────────────────────────────────
         reason = None
+
         if price <= leg["sl"]:
             reason = "sl"
         elif leg["phase2"] and leg["trail_price"] and price <= leg["trail_price"]:
             reason = "trail"
-        elif elapsed >= MAX_HOLD_SECS and current_pct < 1.0:
-            reason = "timeout"   # hard safety net only
-        elif self._brain.should_exit(state, current_pct):
+        elif elapsed >= timeout_secs:
+            if current_pct < min_profit_pct:
+                reason = "timeout"
+        elif self._brain.check_ai_exit(current_pct, momentum_score):
+            # AI exit: profit decaying every tick + momentum collapsed
             reason = "ai_exit"
 
         if reason:
@@ -247,20 +356,23 @@ class BuyExitStrategy:
             held_secs = int((datetime.now() - self._open_time).total_seconds())
 
         result = {
-            "side":            leg["side"],
-            "entry":           leg["entry"],
-            "exit_price":      exit_price,
-            "qty":             leg["qty"],
-            "pnl":             pnl,
-            "pnl_pct":         pnl_pct,
-            "reason":          reason,
-            "equity_after":    self.capital,
-            "sl_pct":          leg["sl_pct"],
-            "trail_pct":       leg["trail_pct"],
-            "option_atr":      leg["option_atr"],
-            "peak_profit":     leg["peak_profit"],
-            "peak_profit_pct": leg["peak_profit_pct"],
-            "held_secs":       held_secs,
+            "side":                 leg["side"],
+            "entry":                leg["entry"],
+            "exit_price":           exit_price,
+            "qty":                  leg["qty"],
+            "pnl":                  pnl,
+            "pnl_pct":              pnl_pct,
+            "reason":               reason,
+            "equity_after":         self.capital,
+            "sl_pct":               leg["sl_pct"],
+            "trail_pct":            leg["trail_pct"],
+            "atr_trail_pct":        leg["atr_trail_pct"],
+            "profit_trail_pct":     leg["profit_trail_pct"],
+            "min_trail_pct_reached":leg["min_trail_pct_reached"],
+            "option_atr":           leg["option_atr"],
+            "peak_profit":          leg["peak_profit"],
+            "peak_profit_pct":      leg["peak_profit_pct"],
+            "held_secs":            held_secs,
         }
 
         try:
@@ -268,8 +380,8 @@ class BuyExitStrategy:
         except Exception as e:
             print(f"[CSV] write error: {e}")
 
-        # Retrospective training: label every recorded tick and learn
-        self._brain.learn()
+        # Teach the brain from this trade's outcome
+        self._brain.on_trade_closed(result)
 
         return result
 
@@ -280,27 +392,32 @@ class BuyExitStrategy:
         if self._open_time:
             held = int((datetime.now() - self._open_time).total_seconds())
         return {
-            "side":            self._leg["side"],
-            "entry":           self._leg["entry"],
-            "sl":              self._leg["sl"],
-            "sl_pct":          self._leg["sl_pct"],
-            "trail_pct":       self._leg["trail_pct"],
-            "option_atr":      self._leg["option_atr"],
-            "qty":             self._leg["qty"],
-            "peak_price":      self._leg["peak_price"],
-            "peak_profit":     self._leg["peak_profit"],
-            "peak_profit_pct": self._leg["peak_profit_pct"],
-            "trail_price":     self._leg["trail_price"],
-            "phase2":          self._leg["phase2"],
-            "breakeven_moved": self._leg["breakeven_moved"],
-            "momentum_score":  self._leg.get("momentum_score", 0.5),
-            "exit_score":      self._leg.get("exit_score",     0.0),
-            "brain":           self._brain.state,
-            "open":            self._leg["open"],
-            "held_secs":       held,
+            "side":                 self._leg["side"],
+            "entry":                self._leg["entry"],
+            "sl":                   self._leg["sl"],
+            "sl_pct":               self._leg["sl_pct"],
+            "trail_pct":            self._leg["trail_pct"],
+            "atr_trail_pct":        self._leg["atr_trail_pct"],
+            "profit_trail_pct":     self._leg["profit_trail_pct"],
+            "time_trail_pct":       self._leg["time_trail_pct"],
+            "min_trail_pct_reached":self._leg["min_trail_pct_reached"],
+            "breakeven_moved":      self._leg["breakeven_moved"],
+            "option_atr":           self._leg["option_atr"],
+            "qty":                  self._leg["qty"],
+            "peak_price":           self._leg["peak_price"],
+            "peak_profit":          self._leg["peak_profit"],
+            "peak_profit_pct":      self._leg["peak_profit_pct"],
+            "trail_price":          self._leg["trail_price"],
+            "phase2":               self._leg["phase2"],
+            "move_type":            self._leg["move_type"],
+            "momentum_score":       self._leg.get("momentum_score", 0.5),
+            "brain":                self._brain.state,
+            "open":                 self._leg["open"],
+            "held_secs":            held,
         }
 
     def reset(self):
-        self._leg            = None
-        self._open_time      = None
-        self._opt_price_hist = deque(maxlen=OPTION_ATR_PERIOD + 1)
+        self._leg                = None
+        self._open_time          = None
+        self._opt_price_hist     = deque(maxlen=OPTION_ATR_PERIOD + 1)
+        self._trail_pct_override = None

@@ -31,7 +31,7 @@ from collections import deque
 from datetime import datetime
 
 BRAIN_STATE_FILE = "brain_state.json"
-N_FEATURES       = 8
+N_FEATURES       = 7
 
 # ── Logistic helpers ──────────────────────────────────────────────────────────
 
@@ -96,7 +96,7 @@ class OnlineLR:
 
     LEARNING_RATE  = 0.05
     L2_LAMBDA      = 0.001    # regularisation strength
-    MIN_SAMPLES    = 30       # model is neutral below this — don't filter entries
+    MIN_SAMPLES    = 15       # model is neutral below this — don't filter entries
 
     def __init__(self):
         self.weights  = [0.0] * N_FEATURES
@@ -109,22 +109,11 @@ class OnlineLR:
         z = sum(self.weights[i] * x_norm[i] for i in range(N_FEATURES)) + self.bias
         return _sigmoid(z)
 
-    WIN_THRESHOLD_PCT = 1.5   # used for win_rate tracking only (not gradient)
-
-    def update(self, x_norm: list, pnl_pct: float):
-        """
-        PnL-weighted gradient descent.
-        Uses a soft label derived from pnl_pct instead of binary 0/1:
-          pnl=0%   → soft_label=0.5 (neutral)
-          pnl=+16% → soft_label≈0.88 (strong positive signal)
-          pnl=-16% → soft_label≈0.12 (strong negative signal)
-        Weight scales gradient by |pnl| so big wins/losses teach more.
-        """
-        soft_label = _sigmoid(pnl_pct / 8.0)
-        weight     = min(abs(pnl_pct) / 8.0 + 0.5, 3.0)
-        p          = self.predict(x_norm)
-        error      = (soft_label - p) * weight
-        lr         = self.LEARNING_RATE
+    def update(self, x_norm: list, label: int):
+        """Perform one gradient-descent step."""
+        p     = self.predict(x_norm)
+        error = label - p
+        lr    = self.LEARNING_RATE
 
         for i in range(N_FEATURES):
             self.weights[i] = (
@@ -134,7 +123,7 @@ class OnlineLR:
         self.bias += lr * error
 
         self.n_trades += 1
-        if pnl_pct >= self.WIN_THRESHOLD_PCT:
+        if label == 1:
             self.n_wins += 1
 
     @property
@@ -155,16 +144,7 @@ class OnlineLR:
         }
 
     def from_dict(self, d: dict):
-        loaded = d.get("weights", [])
-        if len(loaded) != N_FEATURES:
-            # Feature count changed — reset weights but preserve trade history
-            print(
-                f"[MarketBrain] feature count changed "
-                f"({len(loaded)}→{N_FEATURES}) — resetting weights"
-            )
-            self.weights = [0.0] * N_FEATURES
-        else:
-            self.weights  = loaded
+        self.weights  = d.get("weights",  [0.0] * N_FEATURES)
         self.bias     = d.get("bias",     0.0)
         self.n_trades = d.get("n_trades", 0)
         self.n_wins   = d.get("n_wins",   0)
@@ -225,19 +205,25 @@ class MarketRegimeDetector:
 
 class FeatureBuilder:
     """
-    Builds an 8-element raw feature vector from market state at entry time.
+    Builds a 7-element raw feature vector from market state at entry time.
 
     Features:
-      0  spike_strength   abs(spike_pts) / jump_threshold       → spike quality
-      1  slope            regression slope (momentum direction)
-      2  nifty_velocity   avg |pts/tick| over last 5 NIFTY ticks → speed
-      3  time_of_day      minutes since 9:15 / 375               → 0–1
-      4  atr_pct          NIFTY ATR / price * 100                → volatility
-      5  fast_entry       1.0 if fast entry, 0.0 if confirmed
-      6  is_trending      1.0 if trending_up or trending_down, else 0.0
-      7  trend_direction  1.0=trending_up, -1.0=trending_down, 0.0=other
+      0  spike_strength  abs(spike_pts) / jump_threshold       → spike quality
+      1  slope           regression slope (momentum direction)
+      2  nifty_velocity  avg |pts/tick| over last 5 NIFTY ticks → speed
+      3  time_of_day     minutes since 9:15 / 375               → 0–1
+      4  atr_pct         NIFTY ATR / price * 100                → volatility
+      5  fast_entry      1.0 if fast entry, 0.0 if confirmed
+      6  regime_enc      trending=1.0, choppy=−1.0, volatile=0.5, unknown=0
     """
 
+    REGIME_ENC = {
+        "trending_up":   1.0,
+        "trending_down": 1.0,   # strong trend, just different direction
+        "choppy":       -1.0,
+        "volatile":      0.5,
+        "unknown":       0.0,
+    }
     MARKET_OPEN = 9 * 60 + 15    # 9:15 in minutes
     MARKET_MINS = 375            # total trading minutes
 
@@ -276,19 +262,10 @@ class FeatureBuilder:
         # 5 — fast entry flag
         fast_flag = 1.0 if fast_entry else 0.0
 
-        # 6 — is_trending: 1.0 if any trend direction, 0.0 if choppy/volatile/unknown
-        is_trending = 1.0 if regime in ("trending_up", "trending_down") else 0.0
+        # 6 — regime encoding
+        regime_enc = self.REGIME_ENC.get(regime, 0.0)
 
-        # 7 — trend_direction: separates up vs down trend so LR can learn directional bias
-        if regime == "trending_up":
-            trend_direction = 1.0
-        elif regime == "trending_down":
-            trend_direction = -1.0
-        else:
-            trend_direction = 0.0
-
-        return [spike_strength, slope_val, velocity, time_norm, atr_pct,
-                fast_flag, is_trending, trend_direction]
+        return [spike_strength, slope_val, velocity, time_norm, atr_pct, fast_flag, regime_enc]
 
 
 # ── Market Brain (top-level API) ──────────────────────────────────────────────
@@ -379,8 +356,10 @@ class MarketBrain:
             return
 
         pnl_pct = result.get("pnl_pct", 0.0) or 0.0
-        x_norm  = self._stats.normalize(self._last_raw_features)
-        self._lr.update(x_norm, pnl_pct)   # PnL-weighted, not binary
+        label   = 1 if pnl_pct >= self.WIN_THRESHOLD_PCT else 0
+
+        x_norm = self._stats.normalize(self._last_raw_features)
+        self._lr.update(x_norm, label)
         self._last_raw_features = None
         self._save()
 
@@ -399,8 +378,7 @@ class MarketBrain:
             "bias":             round(self._lr.bias, 4),
             "feature_names":    [
                 "spike_strength", "slope", "nifty_velocity",
-                "time_of_day", "atr_pct", "fast_entry",
-                "is_trending", "trend_direction",
+                "time_of_day", "atr_pct", "fast_entry", "regime"
             ],
         }
 
