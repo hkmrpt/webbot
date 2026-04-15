@@ -1,0 +1,6 @@
+date,time,side,entry,exit_price,qty,lot_qty,pnl,pnl_pct,reason,sl_pct,trail_pct,atr_trail_pct,profit_trail_pct,min_trail_pct_reached,option_atr,peak_profit,peak_profit_pct,held_secs,equity_after
+2026-04-09,11:00:22,CE,236.35,236.35,1,65,0.0,0.0,nifty_reversal,15.0,13.8,15.0,,25.0,0.535,0.0,0.0,0,100000.0
+2026-04-09,11:24:42,PE,230.2,230.25,1,65,3.25,0.02,nifty_reversal,15.0,13.4,15.0,,25.0,0.38,3.25,0.02,0,100003.25
+2026-04-09,15:03:50,PE,192.9,194.7,1,65,117.0,0.93,nifty_reversal,15.0,15.0,0.675,117.0,0.93,0,100117.0
+2026-04-10,13:31:26,PE,139.05,139.0,1,65,-3.25,-0.04,trail,15.0,15.0,0.095,29.25,0.32,1,99996.75
+2026-04-13,10:43:16,CE,68.35,68.5,1,65,9.75,0.22,nifty_reversal,15.0,15.0,0.22,9.75,0.22,1,100009.75

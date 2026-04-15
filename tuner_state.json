@@ -1,0 +1,29 @@
+{
+  "n": 5,
+  "win_n": 0,
+  "loss_n": 5,
+  "win_avg": {
+    "sl_pct": 15.0,
+    "trail_pct": 25.0,
+    "timeout_secs": 60.0,
+    "confirm_ticks": 3.0,
+    "jump_floor": 4.0,
+    "slope_min": 0.3
+  },
+  "loss_avg": {
+    "sl_pct": 15.0,
+    "trail_pct": 22.42528,
+    "timeout_secs": 46.464,
+    "confirm_ticks": 3.318528,
+    "jump_floor": 4.0,
+    "slope_min": 0.3
+  },
+  "learned": {
+    "sl_pct": 15.0,
+    "trail_pct": 25.0,
+    "timeout_secs": 60.0,
+    "confirm_ticks": 3.0,
+    "jump_floor": 4.0,
+    "slope_min": 0.3
+  }
+}

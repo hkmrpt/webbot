@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls C:/Users/hkmrp/PycharmProjects/webbot/*.py)",
+      "Bash(dir /b C:\\\\Users\\\\hkmrp\\\\PycharmProjects\\\\webbot\\\\*.py)",
+      "Read(//mnt/c/Users/hkmrp/PycharmProjects/**)",
+      "Bash(python -c ':*)",
+      "Bash(python -c \"import buy_app; print\\('buy_app OK'\\)\")",
+      "Bash(python -c \"import buy_app; print\\('OK'\\)\")"
+    ]
+  }
+}
