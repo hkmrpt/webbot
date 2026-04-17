@@ -6,7 +6,8 @@
       "Read(//mnt/c/Users/hkmrp/PycharmProjects/**)",
       "Bash(python -c ':*)",
       "Bash(python -c \"import buy_app; print\\('buy_app OK'\\)\")",
-      "Bash(python -c \"import buy_app; print\\('OK'\\)\")"
+      "Bash(python -c \"import buy_app; print\\('OK'\\)\")",
+      "Bash(python:*)"
     ]
   }
 }

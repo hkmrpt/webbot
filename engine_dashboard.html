@@ -1,0 +1,626 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Trading Engine v1.0</title>
+<script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+<style>
+:root{
+  --bg:#0d1117;--bg2:#161b22;--bg3:#21262d;
+  --border:#30363d;--text:#e6edf3;--muted:#8b949e;
+  --green:#3fb950;--red:#f85149;--blue:#58a6ff;
+  --yellow:#d29922;--orange:#f0883e;--purple:#bc8cff;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font:13px/1.5 'Consolas','Courier New',monospace;
+     display:grid;grid-template-rows:auto 1fr;min-height:100vh}
+
+/* HEADER */
+header{background:var(--bg2);border-bottom:1px solid var(--border);
+       padding:8px 16px;display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+header h1{font-size:15px;color:var(--blue)}
+.badge{padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600}
+.badge-demo{background:#1f3a5f;color:var(--blue)}
+.badge-real{background:#3d1212;color:var(--red)}
+.badge-on{background:#1a3a23;color:var(--green)}
+.badge-off{background:#2d2d2d;color:var(--muted)}
+.header-pnl{margin-left:auto;font-size:14px;font-weight:700}
+.pos{color:var(--green)}.neg{color:var(--red)}
+
+/* LAYOUT */
+main{display:grid;grid-template-columns:300px 1fr 280px;gap:0;overflow:hidden;height:calc(100vh - 44px)}
+.panel{border-right:1px solid var(--border);overflow-y:auto;padding:10px}
+.panel:last-child{border-right:none}
+
+/* CARD */
+.card{background:var(--bg3);border:1px solid var(--border);border-radius:6px;
+      margin-bottom:8px;overflow:hidden}
+.card-title{background:var(--bg2);padding:5px 10px;font-size:11px;
+             text-transform:uppercase;letter-spacing:.5px;color:var(--muted);
+             border-bottom:1px solid var(--border)}
+.card-body{padding:8px 10px}
+
+/* GRID ROWS */
+.row{display:flex;justify-content:space-between;align-items:center;
+     padding:2px 0;border-bottom:1px solid #1e2329}
+.row:last-child{border-bottom:none}
+.row label{color:var(--muted);font-size:11px}
+.row span{font-size:12px;font-weight:600}
+
+/* INPUTS */
+input[type=text],select{width:100%;background:var(--bg);border:1px solid var(--border);
+  color:var(--text);padding:4px 7px;border-radius:4px;font:inherit;margin-bottom:4px}
+input[type=text]:focus,select:focus{border-color:var(--blue);outline:none}
+
+/* BUTTONS */
+button{cursor:pointer;border:none;border-radius:4px;padding:6px 12px;
+       font:inherit;font-size:12px;transition:opacity .15s}
+button:hover{opacity:.85}
+button:disabled{opacity:.4;cursor:default}
+.btn-green{background:#238636;color:#fff}
+.btn-red{background:#da3633;color:#fff}
+.btn-blue{background:#1f6feb;color:#fff}
+.btn-gray{background:var(--bg3);color:var(--text);border:1px solid var(--border)}
+.btn-full{width:100%;margin-bottom:4px}
+
+/* STRATEGY TABLE */
+.strat-row{display:grid;grid-template-columns:80px 1fr 50px 40px 40px;
+           gap:4px;align-items:center;padding:3px 0;
+           border-bottom:1px solid #1e2329;font-size:11px}
+.strat-row:last-child{border-bottom:none}
+.strat-name{font-weight:700;color:var(--blue)}
+.strat-w{color:var(--green)}.strat-l{color:var(--red)}
+.strat-toggle{appearance:none;width:28px;height:14px;background:var(--border);
+              border-radius:7px;cursor:pointer;position:relative;outline:none}
+.strat-toggle:checked{background:var(--green)}
+
+/* INDICATORS */
+.ind-grid{display:grid;grid-template-columns:1fr 1fr;gap:3px}
+.ind-cell{background:var(--bg2);border-radius:3px;padding:4px 6px}
+.ind-cell label{display:block;font-size:10px;color:var(--muted);margin-bottom:1px}
+.ind-cell span{font-size:12px;font-weight:600}
+
+/* LOG */
+#log-panel{font-size:11px}
+.log-entry{padding:2px 0;border-bottom:1px solid #1a1f27}
+.log-entry:last-child{border-bottom:none}
+.log-ts{color:var(--muted);margin-right:4px}
+.lvl-success{color:var(--green)}.lvl-error{color:var(--red)}
+.lvl-warning{color:var(--yellow)}.lvl-trade{color:var(--orange)}
+.lvl-info{color:var(--text)}
+
+/* SIGNAL HISTORY */
+.sig-row{padding:2px 0;border-bottom:1px solid #1e2329;font-size:11px}
+.sig-row:last-child{border-bottom:none}
+.sig-ce{color:var(--green)}.sig-pe{color:var(--red)}
+.sig-conf{color:var(--blue);margin-left:4px}
+
+/* TRADE BOX */
+.trade-box{background:var(--bg2);border-radius:6px;padding:8px 10px;
+           border:1px solid var(--border);margin-bottom:8px}
+.trade-box.open{border-color:var(--orange)}
+.pnl-big{font-size:18px;font-weight:700;margin:4px 0}
+.regime{padding:2px 6px;border-radius:3px;font-size:11px;font-weight:600;display:inline-block}
+.regime-trending_up{background:#1a3a23;color:var(--green)}
+.regime-trending_dn{background:#3d1212;color:var(--red)}
+.regime-volatile{background:#3d2d00;color:var(--yellow)}
+.regime-ranging{background:#1a2030;color:var(--blue)}
+.regime-unknown{background:var(--bg3);color:var(--muted)}
+
+/* ORB bar */
+.orb-bar{height:6px;background:var(--bg2);border-radius:3px;overflow:hidden;margin:4px 0}
+.orb-fill{height:100%;background:var(--yellow);border-radius:3px}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Trading Engine v1.0</h1>
+  <span id="mode-badge" class="badge badge-demo">DEMO</span>
+  <span id="bot-badge"  class="badge badge-off">STOPPED</span>
+  <span id="ws-badge"   class="badge badge-off">WS</span>
+  <span id="regime-badge" class="regime regime-unknown">unknown</span>
+  <div class="header-pnl">
+    Session: <span id="h-pnl" style="color:var(--muted)">₹0</span>
+    &nbsp;|&nbsp;
+    Trades: <span id="h-trades">0</span>
+    &nbsp;|&nbsp;
+    W/L: <span id="h-wl">0/0</span>
+  </div>
+</header>
+
+<main>
+  <!-- LEFT: Controls -->
+  <div class="panel" id="left-panel">
+
+    <div class="card">
+      <div class="card-title">Instruments</div>
+      <div class="card-body">
+        <label><input type="checkbox" id="chk-ce"> CE</label>
+        <input type="text" id="ce-input" placeholder="SYMBOL/TOKEN  e.g. NIFTY25APR24000CE/12345678">
+        <label><input type="checkbox" id="chk-pe"> PE</label>
+        <input type="text" id="pe-input" placeholder="SYMBOL/TOKEN  e.g. NIFTY25APR24000PE/87654321">
+        <br>
+        <button class="btn-green btn-full" id="btn-start" onclick="startEngine()">▶ START ENGINE</button>
+        <button class="btn-red btn-full"  id="btn-stop"  onclick="stopEngine()" disabled>■ STOP ENGINE</button>
+        <button class="btn-gray btn-full" id="btn-exit"  onclick="manualExit()" disabled>⏏ MANUAL EXIT</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Mode</div>
+      <div class="card-body" style="display:flex;gap:6px">
+        <button class="btn-blue" onclick="setMode('demo')" style="flex:1">DEMO</button>
+        <button class="btn-red"  onclick="setMode('real')" style="flex:1">REAL</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Risk Settings</div>
+      <div class="card-body">
+        <div class="row"><label>Risk % per trade</label>
+          <input type="text" id="rc-risk_pct" style="width:70px;text-align:right" onchange="updateRC('risk_pct',this.value)">
+        </div>
+        <div class="row"><label>Min confidence</label>
+          <input type="text" id="rc-min_confidence" style="width:70px;text-align:right" onchange="updateRC('min_confidence',this.value)">
+        </div>
+        <div class="row"><label>Max trades/day</label>
+          <input type="text" id="rc-max_trades_day" style="width:70px;text-align:right" onchange="updateRC('max_trades_day',this.value)">
+        </div>
+        <div class="row"><label>Max loss ₹</label>
+          <input type="text" id="rc-max_daily_loss" style="width:70px;text-align:right" onchange="updateRC('max_daily_loss',this.value)">
+        </div>
+        <div class="row"><label>Profit target ₹</label>
+          <input type="text" id="rc-daily_profit_target" style="width:70px;text-align:right" onchange="updateRC('daily_profit_target',this.value)">
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Spike Params</div>
+      <div class="card-body">
+        <div class="row"><label>ATR multiplier</label>
+          <input type="text" id="rc-jump_atr_multiplier" style="width:60px;text-align:right" onchange="updateRC('jump_atr_multiplier',this.value)">
+        </div>
+        <div class="row"><label>Min pts</label>
+          <input type="text" id="rc-jump_min_pts" style="width:60px;text-align:right" onchange="updateRC('jump_min_pts',this.value)">
+        </div>
+        <div class="row"><label>Max pts</label>
+          <input type="text" id="rc-jump_max_pts" style="width:60px;text-align:right" onchange="updateRC('jump_max_pts',this.value)">
+        </div>
+        <div class="row"><label>SL p1 %</label>
+          <input type="text" id="rc-sl_phase1_pct" style="width:60px;text-align:right" onchange="updateRC('sl_phase1_pct',this.value)">
+        </div>
+        <div class="row"><label>SL p2 %</label>
+          <input type="text" id="rc-sl_phase2_pct" style="width:60px;text-align:right" onchange="updateRC('sl_phase2_pct',this.value)">
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">enctoken</div>
+      <div class="card-body">
+        <input type="text" id="enc-input" placeholder="paste new enctoken...">
+        <button class="btn-blue btn-full" onclick="saveEnctoken()">Save Token</button>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- MIDDLE: Market + Trade -->
+  <div class="panel" id="mid-panel">
+
+    <!-- NIFTY prices -->
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-bottom:8px">
+      <div class="trade-box">
+        <div style="color:var(--muted);font-size:10px">NIFTY</div>
+        <div id="nifty-price" style="font-size:20px;font-weight:700">—</div>
+      </div>
+      <div class="trade-box">
+        <div style="color:var(--green);font-size:10px">CE</div>
+        <div id="ce-price" style="font-size:18px;font-weight:700;color:var(--green)">—</div>
+        <div id="ce-strike" style="font-size:10px;color:var(--muted)">—</div>
+      </div>
+      <div class="trade-box">
+        <div style="color:var(--red);font-size:10px">PE</div>
+        <div id="pe-price" style="font-size:18px;font-weight:700;color:var(--red)">—</div>
+        <div id="pe-strike" style="font-size:10px;color:var(--muted)">—</div>
+      </div>
+    </div>
+
+    <!-- Active trade -->
+    <div class="card" id="trade-card">
+      <div class="card-title">Active Trade</div>
+      <div class="card-body">
+        <div id="no-trade" style="color:var(--muted);text-align:center;padding:10px">No open trade</div>
+        <div id="trade-details" style="display:none">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+            <span id="td-side" style="font-size:14px;font-weight:700"></span>
+            <span id="td-strategy" style="font-size:11px;color:var(--blue)"></span>
+            <span id="td-phase" class="badge" style="font-size:10px"></span>
+          </div>
+          <div class="pnl-big" id="td-livepnl">₹0</div>
+          <div class="ind-grid" style="margin-bottom:6px">
+            <div class="ind-cell"><label>Entry</label><span id="td-entry">—</span></div>
+            <div class="ind-cell"><label>Current</label><span id="td-curr">—</span></div>
+            <div class="ind-cell"><label>SL</label><span id="td-sl" style="color:var(--red)">—</span></div>
+            <div class="ind-cell"><label>Trail</label><span id="td-trail" style="color:var(--yellow)">—</span></div>
+            <div class="ind-cell"><label>Peak</label><span id="td-peak" style="color:var(--green)">—</span></div>
+            <div class="ind-cell"><label>Target</label><span id="td-target" style="color:var(--blue)">—</span></div>
+            <div class="ind-cell"><label>Held</label><span id="td-held">—</span></div>
+            <div class="ind-cell"><label>Profit %</label><span id="td-pct">—</span></div>
+          </div>
+          <div style="height:4px;background:var(--bg2);border-radius:2px;overflow:hidden;margin-bottom:4px">
+            <div id="td-progress" style="height:100%;background:var(--green);transition:width .3s"></div>
+          </div>
+          <div style="font-size:10px;color:var(--muted)" id="td-velocity">velocity: —</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Market Indicators -->
+    <div class="card">
+      <div class="card-title">Market Indicators</div>
+      <div class="card-body">
+        <div class="ind-grid">
+          <div class="ind-cell"><label>VWAP</label><span id="i-vwap">—</span></div>
+          <div class="ind-cell"><label>VWAP Upper</label><span id="i-vwap-u">—</span></div>
+          <div class="ind-cell"><label>VWAP Lower</label><span id="i-vwap-l">—</span></div>
+          <div class="ind-cell"><label>RSI 14</label><span id="i-rsi">—</span></div>
+          <div class="ind-cell"><label>EMA 9</label><span id="i-ema9">—</span></div>
+          <div class="ind-cell"><label>EMA 21</label><span id="i-ema21">—</span></div>
+          <div class="ind-cell"><label>ATR (short)</label><span id="i-atr-s">—</span></div>
+          <div class="ind-cell"><label>ATR (long)</label><span id="i-atr-l">—</span></div>
+          <div class="ind-cell"><label>Slope 20</label><span id="i-slope">—</span></div>
+          <div class="ind-cell"><label>Velocity</label><span id="i-vel">—</span></div>
+          <div class="ind-cell"><label>Supertrend</label><span id="i-super">—</span></div>
+          <div class="ind-cell"><label>Regime</label><span id="i-regime">—</span></div>
+        </div>
+        <div style="margin-top:6px">
+          <div style="display:flex;justify-content:space-between;font-size:11px">
+            <span style="color:var(--muted)">ORB</span>
+            <span id="orb-status" style="color:var(--yellow)">forming...</span>
+          </div>
+          <div class="orb-bar"><div class="orb-fill" id="orb-bar" style="width:0%"></div></div>
+          <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--muted)">
+            <span id="orb-low">—</span>
+            <span id="orb-range">—</span>
+            <span id="orb-high">—</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Candles -->
+    <div class="card">
+      <div class="card-title">Last Candles</div>
+      <div class="card-body">
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px">
+          <div><div style="font-size:10px;color:var(--muted);margin-bottom:3px">1m</div><div id="c-1m" style="font-size:11px">—</div></div>
+          <div><div style="font-size:10px;color:var(--muted);margin-bottom:3px">3m</div><div id="c-3m" style="font-size:11px">—</div></div>
+          <div><div style="font-size:10px;color:var(--muted);margin-bottom:3px">5m</div><div id="c-5m" style="font-size:11px">—</div></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Last signal -->
+    <div class="card">
+      <div class="card-title">Last Signal</div>
+      <div class="card-body" id="last-signal-box">
+        <div style="color:var(--muted);font-size:11px">No signals yet</div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- RIGHT: Strategies + Log -->
+  <div class="panel" id="right-panel">
+
+    <div class="card">
+      <div class="card-title">Strategies</div>
+      <div class="card-body" id="strat-table">
+        <div style="color:var(--muted);font-size:11px">Starting...</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Signal History</div>
+      <div class="card-body" id="sig-history">
+        <div style="color:var(--muted);font-size:11px">No signals</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Session Stats</div>
+      <div class="card-body">
+        <div class="row"><label>Session P&L</label><span id="s-pnl">₹0</span></div>
+        <div class="row"><label>Last trade P&L</label><span id="s-tpnl">—</span></div>
+        <div class="row"><label>Trades</label><span id="s-trades">0</span></div>
+        <div class="row"><label>W / L</label><span id="s-wl">0 / 0</span></div>
+        <div class="row"><label>Capital</label><span id="s-cap">—</span></div>
+        <div class="row"><label>SL streak</label><span id="s-streak">0</span></div>
+        <div class="row"><label>Cooldown</label><span id="s-cd">—</span></div>
+        <div class="row"><label>Skip reason</label><span id="s-skip" style="font-size:10px;color:var(--muted);max-width:160px;text-align:right;word-break:break-word">—</span></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title" style="display:flex;justify-content:space-between">
+        <span>Log</span>
+        <button class="btn-gray" style="font-size:10px;padding:1px 6px" onclick="clearLog()">clear</button>
+      </div>
+      <div class="card-body" id="log-panel" style="max-height:350px;overflow-y:auto"></div>
+    </div>
+
+  </div>
+</main>
+
+<script>
+const socket = io();
+let lastState = {};
+
+// ── Connection ────────────────────────────────────────────────
+socket.on('connect',    () => el('ws-badge').className = 'badge badge-on');
+socket.on('disconnect', () => el('ws-badge').className = 'badge badge-off');
+socket.on('ws_status', d => {
+  el('ws-badge').className = d.connected ? 'badge badge-on' : 'badge badge-off';
+  el('ws-badge').textContent = d.connected ? 'WS ✔' : 'WS ✖';
+});
+
+socket.on('log', d => appendLog(d));
+
+socket.on('state', d => {
+  lastState = d;
+  render(d);
+});
+
+socket.on('daily_reset', d => {
+  appendLogRaw({ts: '--:--:--', msg: `📅 New day ${d.date} — session reset`, level:'info'});
+});
+
+// ── Render ────────────────────────────────────────────────────
+function render(s) {
+  // Header
+  el('mode-badge').className  = s.trading_mode === 'real' ? 'badge badge-real' : 'badge badge-demo';
+  el('mode-badge').textContent = s.trading_mode.toUpperCase();
+  el('bot-badge').className   = s.running ? 'badge badge-on' : 'badge badge-off';
+  el('bot-badge').textContent = s.running ? 'RUNNING' : 'STOPPED';
+  el('h-pnl').textContent     = fmt(s.session_pnl);
+  el('h-pnl').className       = s.session_pnl >= 0 ? 'pos' : 'neg';
+  el('h-trades').textContent  = s.trades_today || 0;
+  el('h-wl').textContent      = `${s.wins||0}/${s.losses||0}`;
+
+  // Regime badge
+  const reg = (s.ctx && s.ctx.regime) || s.regime || 'unknown';
+  el('regime-badge').className = `regime regime-${reg}`;
+  el('regime-badge').textContent = reg;
+
+  // NIFTY + options
+  el('nifty-price').textContent = s.nifty_price ? s.nifty_price.toFixed(2) : '—';
+  el('ce-price').textContent    = s.ce_price  ? s.ce_price.toFixed(2)  : '—';
+  el('pe-price').textContent    = s.pe_price  ? s.pe_price.toFixed(2)  : '—';
+  el('ce-strike').textContent   = s.ce_strike || '—';
+  el('pe-strike').textContent   = s.pe_strike || '—';
+
+  // Trade
+  if (s.trade_open && s.entry) {
+    el('no-trade').style.display     = 'none';
+    el('trade-details').style.display = '';
+    el('trade-card').style.borderColor = 'var(--orange)';
+    el('btn-exit').disabled = false;
+
+    const side  = s.opt_side || s.active_side || '';
+    const col   = side === 'CE' ? 'var(--green)' : 'var(--red)';
+    el('td-side').textContent = side;
+    el('td-side').style.color = col;
+    el('td-strategy').textContent = s.trade_strategy ? `[${s.trade_strategy}]` : '';
+    el('td-phase').textContent    = s.phase2 ? 'P2' : 'P1';
+    el('td-phase').style.background = s.phase2 ? '#1a3a23' : '#3d2d00';
+
+    const lp = s.live_pnl || 0;
+    el('td-livepnl').textContent = fmt(lp);
+    el('td-livepnl').style.color = lp >= 0 ? 'var(--green)' : 'var(--red)';
+
+    el('td-entry').textContent = s.entry ? s.entry.toFixed(2) : '—';
+    el('td-curr').textContent  = s.opt_price ? s.opt_price.toFixed(2) : '—';
+    el('td-sl').textContent    = s.sl ? `${s.sl.toFixed(2)} (${(s.sl_pct||0).toFixed(1)}%)` : '—';
+    el('td-trail').textContent = s.trail_price ? `${s.trail_price.toFixed(2)} (${(s.trail_pct||0).toFixed(1)}%)` : '—';
+    el('td-peak').textContent  = s.peak_price ? `${s.peak_price.toFixed(2)} (+${(s.peak_profit_pct||0).toFixed(1)}%)` : '—';
+    el('td-target').textContent = s.target ? s.target.toFixed(2) : '—';
+    el('td-held').textContent  = s.held_secs ? `${s.held_secs}s` : '0s';
+    const pct = s.profit_pct || 0;
+    el('td-pct').textContent   = pct.toFixed(1) + '%';
+    el('td-pct').style.color   = pct >= 0 ? 'var(--green)' : 'var(--red)';
+    el('td-velocity').textContent = `velocity: ${(s.velocity||0).toFixed(3)}  |  breakeven: ${s.breakeven ? '✓' : '—'}`;
+
+    // Progress bar (0–100% toward 30% profit)
+    const prog = Math.min(100, Math.max(0, pct / 30 * 100));
+    el('td-progress').style.width = prog + '%';
+    el('td-progress').style.background = pct < 0 ? 'var(--red)' : pct < 5 ? 'var(--yellow)' : 'var(--green)';
+
+  } else {
+    el('no-trade').style.display      = '';
+    el('trade-details').style.display = 'none';
+    el('trade-card').style.borderColor = 'var(--border)';
+    el('btn-exit').disabled = true;
+  }
+
+  // Indicators
+  const ctx = s.ctx || {};
+  el('i-vwap').textContent    = ctx.vwap    ? ctx.vwap.toFixed(2)    : '—';
+  el('i-vwap-u').textContent  = ctx.vwap_upper ? ctx.vwap_upper.toFixed(2) : '—';
+  el('i-vwap-l').textContent  = ctx.vwap_lower ? ctx.vwap_lower.toFixed(2) : '—';
+  const rsi = ctx.rsi14;
+  el('i-rsi').textContent = rsi ? rsi.toFixed(1) : '—';
+  el('i-rsi').style.color = rsi > 70 ? 'var(--red)' : rsi < 30 ? 'var(--green)' : 'var(--text)';
+  el('i-ema9').textContent    = ctx.ema9  ? ctx.ema9.toFixed(2)   : '—';
+  el('i-ema21').textContent   = ctx.ema21 ? ctx.ema21.toFixed(2)  : '—';
+  el('i-atr-s').textContent   = ctx.atr_short ? ctx.atr_short.toFixed(3) : '—';
+  el('i-atr-l').textContent   = ctx.atr_long  ? ctx.atr_long.toFixed(3)  : '—';
+  const sl = ctx.slope_20;
+  el('i-slope').textContent   = sl ? (sl > 0 ? '+' : '') + sl.toFixed(3) : '—';
+  el('i-slope').style.color   = sl > 0 ? 'var(--green)' : sl < 0 ? 'var(--red)' : 'var(--text)';
+  el('i-vel').textContent     = ctx.velocity ? ctx.velocity.toFixed(3) : '—';
+  const sd = ctx.supertrend_dir;
+  el('i-super').textContent   = sd > 0 ? '▲ UP' : sd < 0 ? '▼ DN' : '—';
+  el('i-super').style.color   = sd > 0 ? 'var(--green)' : sd < 0 ? 'var(--red)' : 'var(--muted)';
+  el('i-regime').textContent  = reg;
+  el('i-regime').style.color  = {trending_up:'var(--green)',trending_dn:'var(--red)',
+    volatile:'var(--yellow)',ranging:'var(--blue)'}[reg] || 'var(--muted)';
+
+  // ORB
+  if (ctx.orb_formed) {
+    el('orb-status').textContent = `FORMED  ↔ ${ctx.orb_range?.toFixed(1)}pts`;
+    el('orb-status').style.color = 'var(--yellow)';
+    el('orb-high').textContent   = ctx.orb_high?.toFixed(2) || '—';
+    el('orb-low').textContent    = ctx.orb_low?.toFixed(2)  || '—';
+    el('orb-range').textContent  = `range: ${ctx.orb_range?.toFixed(1) || '—'}pts`;
+    if (ctx.orb_high && ctx.orb_low && s.nifty_price) {
+      const pct = Math.min(100, Math.max(0, (s.nifty_price - ctx.orb_low) / (ctx.orb_high - ctx.orb_low) * 100));
+      el('orb-bar').style.width = pct + '%';
+    }
+  } else {
+    el('orb-status').textContent = 'forming 9:15–9:30';
+    el('orb-status').style.color = 'var(--muted)';
+  }
+
+  // Candles
+  function fmtCandle(c) {
+    if (!c) return '—';
+    const bull = c.c >= c.o;
+    const col  = bull ? '#3fb950' : '#f85149';
+    return `<span style="color:${col}">${bull ? '▲' : '▼'} ${c.c.toFixed(1)}</span>` +
+           `<span style="color:var(--muted);font-size:10px"> H${c.h.toFixed(0)} L${c.l.toFixed(0)}</span>`;
+  }
+  el('c-1m').innerHTML = fmtCandle(ctx.candle_1m);
+  el('c-3m').innerHTML = fmtCandle(ctx.candle_3m);
+  el('c-5m').innerHTML = fmtCandle(ctx.candle_5m);
+
+  // Last signal
+  const sig = s.last_signal;
+  if (sig) {
+    el('last-signal-box').innerHTML = `
+      <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">
+        <span style="font-weight:700;font-size:13px;color:${sig.side==='CE'?'var(--green)':'var(--red)'}">
+          ${sig.side}</span>
+        <span style="color:var(--blue)">[${sig.strategy}]</span>
+        <span style="margin-left:auto;color:var(--blue)">${(sig.confidence*100).toFixed(0)}%</span>
+        <span class="badge badge-demo">${sig.urgency}</span>
+      </div>
+      <div style="font-size:10px;color:var(--muted);word-break:break-all">${sig.reason}</div>`;
+  }
+
+  // Strategy table
+  if (s.strategy_stats) {
+    let html = `<div class="strat-row" style="color:var(--muted);font-size:10px">
+      <span>Strategy</span><span></span><span>W</span><span>L</span><span>On</span></div>`;
+    for (const [name, st] of Object.entries(s.strategy_stats)) {
+      html += `<div class="strat-row">
+        <span class="strat-name">${name}</span>
+        <span style="color:var(--muted);font-size:10px">${(st.win_rate*100).toFixed(0)}%</span>
+        <span class="strat-w">${st.wins}</span>
+        <span class="strat-l">${st.losses}</span>
+        <input type="checkbox" class="strat-toggle" ${st.enabled ? 'checked' : ''}
+               onchange="toggleStrat('${name}',this.checked)">
+      </div>`;
+    }
+    el('strat-table').innerHTML = html;
+  }
+
+  // Signal history
+  if (s.signal_history && s.signal_history.length) {
+    let html = '';
+    for (const sh of [...s.signal_history].reverse()) {
+      html += `<div class="sig-row">
+        <span style="color:var(--muted)">${sh.ts}</span>
+        <span class="${sh.side==='CE'?'sig-ce':'sig-pe'}"> ${sh.side}</span>
+        <span style="color:var(--blue)">[${sh.strategy}]</span>
+        <span class="sig-conf">${(sh.confidence*100).toFixed(0)}%</span>
+      </div>`;
+    }
+    el('sig-history').innerHTML = html;
+  }
+
+  // Session stats
+  el('s-pnl').textContent    = fmt(s.session_pnl);
+  el('s-pnl').style.color    = (s.session_pnl||0) >= 0 ? 'var(--green)' : 'var(--red)';
+  el('s-tpnl').textContent   = s.trade_pnl !== undefined && s.trade_pnl !== null ? fmt(s.trade_pnl) : '—';
+  el('s-tpnl').style.color   = (s.trade_pnl||0) >= 0 ? 'var(--green)' : 'var(--red)';
+  el('s-trades').textContent = s.trades_today || 0;
+  el('s-wl').textContent     = `${s.wins||0} / ${s.losses||0}`;
+  el('s-cap').textContent    = s.capital ? `₹${s.capital.toLocaleString('en-IN')}` : '—';
+  el('s-streak').textContent = s.consecutive_sl_hits || 0;
+  el('s-cd').textContent     = s.cooldown_active ? `${s.cooldown_remaining}s` : '—';
+  el('s-skip').textContent   = s.last_skip_reason || '—';
+
+  // Buttons
+  el('btn-start').disabled = s.running;
+  el('btn-stop').disabled  = !s.running;
+}
+
+// ── Helpers ────────────────────────────────────────────────────
+function el(id) { return document.getElementById(id); }
+function fmt(v) {
+  if (v === null || v === undefined) return '—';
+  const n = Number(v);
+  return (n >= 0 ? '+' : '') + '₹' + Math.abs(n).toLocaleString('en-IN', {maximumFractionDigits:2});
+}
+
+function appendLog(d) { appendLogRaw(d); }
+function appendLogRaw(d) {
+  const p  = el('log-panel');
+  const div = document.createElement('div');
+  div.className = 'log-entry';
+  div.innerHTML = `<span class="log-ts">${d.ts}</span><span class="lvl-${d.level}">${esc(d.msg)}</span>`;
+  p.appendChild(div);
+  if (p.children.length > 300) p.removeChild(p.firstChild);
+  p.scrollTop = p.scrollHeight;
+}
+function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function clearLog() { el('log-panel').innerHTML = ''; }
+
+// ── Actions ────────────────────────────────────────────────────
+function startEngine() {
+  const data = {
+    ce_input: el('ce-input').value,
+    pe_input: el('pe-input').value,
+    trade_ce: el('chk-ce').checked,
+    trade_pe: el('chk-pe').checked,
+  };
+  socket.emit('start_engine', data);
+}
+function stopEngine()  { socket.emit('stop_engine'); }
+function manualExit()  { socket.emit('manual_exit'); }
+function setMode(m)    { socket.emit('set_trading_mode', {mode: m}); }
+function saveEnctoken(){ socket.emit('update_enctoken', {enctoken: el('enc-input').value}); }
+
+function updateRC(key, val) {
+  socket.emit('update_rc', {[key]: parseFloat(val) || val});
+}
+function toggleStrat(name, enabled) {
+  socket.emit('update_rc', {[`strat_${name}`]: enabled});
+}
+
+// Pre-fill RC inputs from state
+socket.on('state', s => {
+  const rcMap = {
+    'risk_pct': s.risk_pct,
+    'min_confidence': s.min_confidence,
+    'max_trades_day': s.trades_today !== undefined ? undefined : null,  // from RC
+  };
+  // We only prefill on first load
+  if (!window._rcPrefilled) {
+    window._rcPrefilled = true;
+    const rc = s;
+    ['risk_pct','min_confidence','max_trades_day','max_daily_loss',
+     'daily_profit_target','jump_atr_multiplier','jump_min_pts','jump_max_pts',
+     'sl_phase1_pct','sl_phase2_pct'].forEach(k => {
+       const inp = el('rc-' + k);
+       if (inp && rc[k] !== undefined) inp.value = rc[k];
+     });
+  }
+});
+</script>
+</body>
+</html>
