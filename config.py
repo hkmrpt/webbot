@@ -9,7 +9,7 @@ TRADING_MODE = "demo"          # "demo" | "real"
 ZERODHA_CONFIG = {
     "api_key":       "kitefront",
     "user_id":       "GIU182",
-    "enctoken":      "2%2B6mrjlX42SB0FaWJws%2BmA3Cbreo38PUHR%2FeLYuWhdVIbGmxZH3GdjrG0kshgfJB9itLFNYKTjN4kxPXYq8VsfFVZbRDbo7LonBnYhlI4dL%2B9YRXLMopzg%3D%3D",
+    "enctoken":      "TBKikBEtNyq981tzCtY2XdWOcXJ5FURnKefyVGvefMUlQXtasWfDuUeUxmzZzmhIIl3DJaerLbqewoU%2F6qGzo41cCOo0B%2F1KgO5PrukbW3HizJ8Xpr%2BgqA%3D%3D",
     "kf_session":    "RxKs57L99OglA1HaT9ELOkkWuo25xPIj",
     "public_token":  "OZKli4yNG5C5be5rneCwHrKEQ7ZtmBCm",
     "uid":           "1774325659463",
