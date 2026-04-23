@@ -73,6 +73,8 @@ from config import (
     FAST_MOVE_VELOCITY,
     BREAKEVEN_TRIGGER_PCT,
     ZERODHA_CONFIG,
+    OPENING_RANGE_MINS,
+    EXPIRY_DAY_JUMP_MULT,
 )
 from buy_exit_strategy import BuyExitStrategy
 from market_brain import MarketBrain
@@ -158,6 +160,8 @@ RC = {
     "sl_cooldown_max_secs":   SL_COOLDOWN_MAX_SECS,
     "jump_adaptive_min":      JUMP_ADAPTIVE_MIN,
     "jump_adaptive_max":      JUMP_ADAPTIVE_MAX,
+    "opening_range_mins":     OPENING_RANGE_MINS,
+    "expiry_day_jump_mult":   EXPIRY_DAY_JUMP_MULT,
 }
 
 # Params whose deque sizes are fixed at startup — they require a restart to

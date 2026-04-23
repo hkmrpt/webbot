@@ -30,8 +30,10 @@ import os
 from collections import deque
 from datetime import datetime
 
+from config import REGIME_TREND_SLOPE, REGIME_CHOP_ATR_CAP, REGIME_VOLATILE_ATR
+
 BRAIN_STATE_FILE = "brain_state.json"
-N_FEATURES       = 8
+N_FEATURES       = 9    # added day_type feature
 
 # ── Logistic helpers ──────────────────────────────────────────────────────────
 
@@ -188,9 +190,13 @@ class MarketRegimeDetector:
     """
 
     WINDOW        = 20    # ticks for slope calculation
-    TREND_SLOPE   = 0.15  # |slope| above this = trending
-    CHOP_ATR_CAP  = 0.5   # ATR/price% below this + flat slope = choppy
-    VOLATILE_ATR  = 0.8   # ATR/price% above this = volatile
+    # Thresholds are in normalized units: slope_pct = slope_pts/tick / price * 100
+    # At NIFTY=24000, a 1pt/tick trend gives slope_pct ≈ 0.0042%.
+    # Old values (0.15, 0.5, 0.8) were orders of magnitude too high — regime was
+    # virtually always "choppy", making directional blocks and 2 ML features useless.
+    TREND_SLOPE   = REGIME_TREND_SLOPE   # configurable via config.py
+    CHOP_ATR_CAP  = REGIME_CHOP_ATR_CAP
+    VOLATILE_ATR  = REGIME_VOLATILE_ATR
 
     def classify(self, nifty_ticks: list) -> str:
         if len(nifty_ticks) < self.WINDOW:
@@ -236,6 +242,7 @@ class FeatureBuilder:
       5  fast_entry       1.0 if fast entry, 0.0 if confirmed
       6  is_trending      1.0 if trending_up or trending_down, else 0.0
       7  trend_direction  1.0=trending_up, -1.0=trending_down, 0.0=other
+      8  day_type         1.0=Thursday(expiry) 0.5=Mon/Fri 0.0=normal
     """
 
     MARKET_OPEN = 9 * 60 + 15    # 9:15 in minutes
@@ -287,8 +294,17 @@ class FeatureBuilder:
         else:
             trend_direction = 0.0
 
+        # 8 — day type: Thursday=expiry(1.0), Mon/Fri=different dynamics(0.5), else 0.0
+        weekday = datetime.now().weekday()   # 0=Mon, 3=Thu, 4=Fri
+        if weekday == 3:
+            day_type = 1.0   # Thursday — weekly NIFTY expiry
+        elif weekday in (0, 4):
+            day_type = 0.5   # Monday/Friday — gap risk, post-expiry dynamics
+        else:
+            day_type = 0.0
+
         return [spike_strength, slope_val, velocity, time_norm, atr_pct,
-                fast_flag, is_trending, trend_direction]
+                fast_flag, is_trending, trend_direction, day_type]
 
 
 # ── Market Brain (top-level API) ──────────────────────────────────────────────
@@ -400,7 +416,7 @@ class MarketBrain:
             "feature_names":    [
                 "spike_strength", "slope", "nifty_velocity",
                 "time_of_day", "atr_pct", "fast_entry",
-                "is_trending", "trend_direction",
+                "is_trending", "trend_direction", "day_type",
             ],
         }
 

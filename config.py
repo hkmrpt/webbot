@@ -154,5 +154,23 @@ RANGE_WINDOW        = 20     # rolling NIFTY tick window
 RANGE_MAX_POINTS    = 25.0   # max allowed spread (pts); above = block
 RANGE_MIN_TICKS     = 10     # min ticks before filter is active
 
+# ── Opening Range Blackout ────────────────────────────────────
+# Skip the first N minutes after market open (9:15 AM).
+# Opening range is full of fake spikes and wide bid-ask spreads.
+OPENING_RANGE_MINS  = 10     # minutes to wait after 9:15 before entries
+
+# ── Expiry Day ────────────────────────────────────────────────
+# Thursday = NIFTY weekly expiry. Options decay fast; require a
+# larger spike to compensate for theta risk and wide bid-ask.
+EXPIRY_DAY_JUMP_MULT = 1.5   # multiply jump threshold by this on Thursday
+
+# ── Market Regime Thresholds ──────────────────────────────────
+# Used by MarketRegimeDetector in market_brain.py.
+# slope_pct = slope_pts_per_tick / nifty_price * 100
+# At NIFTY=24000, 1 pt/tick slope → 0.0042%.
+REGIME_TREND_SLOPE  = 0.003  # slope_pct threshold for trending
+REGIME_CHOP_ATR_CAP = 0.003  # atr_pct below this + flat slope = choppy
+REGIME_VOLATILE_ATR = 0.010  # atr_pct above this = volatile
+
 # ── Trade Log ─────────────────────────────────────────────────
 TRADE_LOG           = "trade_log.csv"
