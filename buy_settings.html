@@ -3,104 +3,466 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
-<title>Buy Robot — Settings</title>
+<title>Buy Robot — Settings v8.2</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet"/>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
 <style>
 :root {
-  --bg:     #050810;
-  --panel:  #0a0d16;
-  --border: #1c2438;
-  --cyan:   #00d4ff;
-  --green:  #00e87a;
-  --green-d:rgba(0,232,122,.11);
-  --red:    #ff3d5c;
-  --red-d:  rgba(255,61,92,.12);
-  --amber:  #ffb020;
-  --amber-d:rgba(255,176,32,.12);
-  --text:   #c8daf0;
-  --text2:  #4e6585;
-  --mono:   'IBM Plex Mono', monospace;
-  --ui:     'Space Grotesk', sans-serif;
+  --bg:      #050810;
+  --panel:   #0a0d16;
+  --panel2:  #0f1420;
+  --panel3:  #141926;
+  --border:  #1c2438;
+  --border2: #263045;
+  --cyan:    #00d4ff;
+  --cyan-d:  rgba(0,212,255,.11);
+  --green:   #00e87a;
+  --green-d: rgba(0,232,122,.11);
+  --red:     #ff3d5c;
+  --red-d:   rgba(255,61,92,.12);
+  --amber:   #ffb020;
+  --amber-d: rgba(255,176,32,.12);
+  --purple:  #b06aff;
+  --purple-d:rgba(176,106,255,.12);
+  --text:    #c8daf0;
+  --text2:   #4e6585;
+  --text3:   #253246;
+  --mono:    'IBM Plex Mono', monospace;
+  --ui:      'Space Grotesk', sans-serif;
+  --r:       7px;
 }
-*,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
-body{background:var(--bg);color:var(--text);font-family:var(--ui);min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:24px;}
+*,*::before,*::after { box-sizing:border-box; margin:0; padding:0; }
+body { background:var(--bg); color:var(--text); font-family:var(--ui); min-height:100vh; padding-bottom:40px; }
 
-.card{width:100%;max-width:520px;background:var(--panel);border:1px solid var(--border);border-radius:10px;overflow:hidden;}
-.card-hdr{padding:14px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px;}
-.card-hdr span{font-size:14px;font-weight:700;}
-.card-hdr .sub{font-size:10px;color:var(--text2);font-family:var(--mono);margin-left:auto;}
-.card-body{padding:18px;}
+/* ── NAV ─────────────────────────────────────────────────────── */
+.nav {
+  position:sticky; top:0; z-index:100;
+  background:var(--panel); border-bottom:1px solid var(--border);
+  padding:10px 20px; display:flex; align-items:center; gap:8px;
+}
+.nav-brand {
+  font-size:13px; font-weight:700; margin-right:12px;
+  display:flex; align-items:center; gap:7px;
+}
+.nav-logo {
+  width:24px; height:24px; border-radius:5px;
+  background:linear-gradient(135deg,var(--cyan),#00c9b1);
+  display:flex; align-items:center; justify-content:center; font-size:11px;
+}
+.nav a {
+  padding:4px 12px; border-radius:5px; border:1px solid var(--border);
+  background:transparent; color:var(--text2); font-size:11px;
+  text-decoration:none; transition:.15s; font-family:var(--mono);
+}
+.nav a:hover  { color:var(--text); background:var(--panel2); }
+.nav a.active { color:var(--cyan); border-color:rgba(0,212,255,.35); background:var(--cyan-d); }
+.nav-status {
+  margin-left:auto; font-family:var(--mono); font-size:10px; color:var(--text3);
+  display:flex; align-items:center; gap:6px;
+}
+.ws-dot { width:6px; height:6px; border-radius:50%; background:var(--red); }
+.ws-dot.on { background:var(--green); box-shadow:0 0 4px var(--green); animation:blink 2s infinite; }
+@keyframes blink { 0%,100%{opacity:1;} 50%{opacity:.3;} }
 
-label{display:block;font-size:11px;font-weight:600;color:var(--text2);margin-bottom:6px;letter-spacing:.3px;}
-textarea{width:100%;background:#080c15;border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--mono);font-size:11px;padding:10px 12px;resize:vertical;line-height:1.6;outline:none;transition:.15s;}
-textarea:focus{border-color:rgba(0,212,255,.5);box-shadow:0 0 0 2px rgba(0,212,255,.08);}
-.hint{font-size:9px;color:var(--text2);margin-top:5px;font-family:var(--mono);}
+/* ── PAGE ────────────────────────────────────────────────────── */
+.page { max-width:940px; margin:0 auto; padding:20px 16px; }
+.page-title {
+  font-size:11px; font-weight:700; letter-spacing:2px; text-transform:uppercase;
+  color:var(--text3); margin-bottom:14px; font-family:var(--mono);
+}
 
-.btn{width:100%;margin-top:14px;padding:10px;border-radius:7px;border:none;background:linear-gradient(135deg,var(--cyan),#00c9b1);color:#050810;font-family:var(--ui);font-size:12px;font-weight:700;cursor:pointer;transition:.15s;}
-.btn:hover{opacity:.85;}
-.btn:disabled{opacity:.4;cursor:not-allowed;}
+.grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+.grid .full { grid-column:1/-1; }
+@media(max-width:600px) { .grid { grid-template-columns:1fr; } }
 
-.toast{position:fixed;top:16px;right:16px;z-index:99;padding:9px 14px;border-radius:7px;font-family:var(--mono);font-size:11px;border:1px solid transparent;max-width:380px;transform:translateX(120%);transition:transform .25s ease;}
-.toast.show{transform:translateX(0);}
-.toast.success{background:var(--green-d);color:var(--green);border-color:rgba(0,232,122,.3);}
-.toast.error{background:var(--red-d);color:var(--red);border-color:rgba(255,61,92,.3);}
-.toast.warn{background:var(--amber-d);color:var(--amber);border-color:rgba(255,176,32,.3);}
+/* ── CARD ────────────────────────────────────────────────────── */
+.card { background:var(--panel); border:1px solid var(--border); border-radius:var(--r); overflow:hidden; }
+.card-hdr {
+  padding:10px 14px; border-bottom:1px solid var(--border);
+  display:flex; align-items:center; gap:8px;
+}
+.card-icon { font-size:14px; flex-shrink:0; }
+.card-title { font-size:12px; font-weight:700; }
+.card-sub { font-size:9px; color:var(--text2); font-family:var(--mono); margin-left:auto; }
+.badge-live    { font-size:8px; font-family:var(--mono); padding:1px 5px; border-radius:3px; background:var(--green-d); color:var(--green); border:1px solid rgba(0,232,122,.25); }
+.badge-restart { font-size:8px; font-family:var(--mono); padding:1px 5px; border-radius:3px; background:var(--amber-d); color:var(--amber); border:1px solid rgba(255,176,32,.25); }
+.card-body { padding:14px; }
 
-.nav{margin-bottom:18px;display:flex;gap:8px;}
-.nav a{padding:4px 12px;border-radius:5px;border:1px solid var(--border);background:transparent;color:var(--text2);font-size:11px;text-decoration:none;transition:.15s;}
-.nav a:hover{color:var(--text);background:#0f1420;}
-.nav a.active{color:var(--cyan);border-color:rgba(0,212,255,.35);background:rgba(0,212,255,.07);}
+/* ── FORM ────────────────────────────────────────────────────── */
+.fg   { display:grid; gap:10px; }
+.fg-2 { grid-template-columns:1fr 1fr; }
+.fg-3 { grid-template-columns:1fr 1fr 1fr; }
+@media(max-width:480px) { .fg-2,.fg-3 { grid-template-columns:1fr; } }
+
+.frow { display:flex; flex-direction:column; gap:4px; }
+
+label {
+  font-size:10px; font-weight:600; color:var(--text2); letter-spacing:.3px;
+  display:flex; align-items:center; gap:4px;
+}
+label .lunit { color:var(--text3); font-weight:400; }
+
+input[type=text], input[type=number], input[type=time], select, textarea {
+  width:100%; background:var(--panel2); border:1px solid var(--border);
+  border-radius:6px; color:var(--text); font-family:var(--mono);
+  font-size:11px; padding:7px 10px; outline:none; transition:.15s;
+  -webkit-appearance:none;
+}
+input[type=text]:focus, input[type=number]:focus,
+input[type=time]:focus, select:focus, textarea:focus {
+  border-color:rgba(0,212,255,.5); box-shadow:0 0 0 2px rgba(0,212,255,.06);
+}
+textarea { resize:vertical; line-height:1.6; }
+select { cursor:pointer; }
+select option { background:var(--panel); }
+input[type=number] { appearance:textfield; }
+input[type=number]::-webkit-inner-spin-button { -webkit-appearance:none; }
+
+/* toggle switch */
+.toggle-row {
+  display:flex; align-items:center; justify-content:space-between;
+  padding:7px 0; border-bottom:1px solid var(--border);
+}
+.toggle-row:last-child { border:none; }
+.toggle-info .toggle-lbl { font-size:11px; color:var(--text); font-weight:500; }
+.toggle-info .toggle-sub { font-size:9px; color:var(--text2); font-family:var(--mono); margin-top:2px; }
+.sw { position:relative; width:38px; height:21px; flex-shrink:0; }
+.sw input { opacity:0; width:0; height:0; }
+.slider {
+  position:absolute; inset:0; background:var(--border2);
+  border-radius:21px; cursor:pointer; transition:.2s;
+}
+.slider::before {
+  content:''; position:absolute; width:15px; height:15px;
+  left:3px; bottom:3px; background:var(--text2);
+  border-radius:50%; transition:.2s;
+}
+.sw input:checked + .slider { background:var(--cyan); }
+.sw input:checked + .slider::before { transform:translateX(17px); background:#050810; }
+
+.hint { font-size:9px; color:var(--text3); font-family:var(--mono); margin-top:3px; line-height:1.5; }
+.divider { height:1px; background:var(--border); margin:10px 0; }
+
+/* ── BUTTONS ─────────────────────────────────────────────────── */
+.btn {
+  padding:8px 16px; border-radius:6px; border:none; cursor:pointer;
+  font-family:var(--ui); font-size:11px; font-weight:700; transition:.15s;
+  display:inline-flex; align-items:center; justify-content:center; gap:5px;
+}
+.btn-primary { background:linear-gradient(135deg,var(--cyan),#00c9b1); color:#050810; }
+.btn-primary:hover { opacity:.85; }
+.btn-primary:disabled { opacity:.35; cursor:not-allowed; }
+.btn-block { width:100%; margin-top:12px; }
+
+/* ── TOAST ───────────────────────────────────────────────────── */
+.toast {
+  position:fixed; bottom:20px; right:20px; z-index:999;
+  padding:10px 16px; border-radius:8px; font-family:var(--mono);
+  font-size:11px; border:1px solid transparent; max-width:380px;
+  transform:translateY(16px); opacity:0; transition:.25s ease; pointer-events:none;
+}
+.toast.show { transform:translateY(0); opacity:1; }
+.toast.success { background:var(--green-d); color:var(--green); border-color:rgba(0,232,122,.3); }
+.toast.error   { background:var(--red-d);   color:var(--red);   border-color:rgba(255,61,92,.3); }
+.toast.warn    { background:var(--amber-d); color:var(--amber); border-color:rgba(255,176,32,.3); }
 </style>
 </head>
 <body>
 
+<!-- NAV -->
 <div class="nav">
+  <div class="nav-brand">
+    <div class="nav-logo">⚡</div>
+    Buy Bot <span style="font-size:9px;font-family:var(--mono);color:var(--text3);font-weight:400;">v8.2</span>
+  </div>
   <a href="/">Dashboard</a>
   <a href="/settings" class="active">Settings</a>
-</div>
-
-<div class="card">
-  <div class="card-hdr">
-    <span>Zerodha Enctoken</span>
-    <span class="sub">restart WS after save</span>
-  </div>
-  <div class="card-body">
-    <label for="enctoken">enctoken</label>
-    <textarea id="enctoken" rows="5" placeholder="Paste full enctoken value from Zerodha cookie…"></textarea>
-    <div class="hint">Browser DevTools → Application → Cookies → kite.zerodha.com → enctoken</div>
-    <button class="btn" id="saveBtn" onclick="save()">Save to config.py</button>
+  <div class="nav-status">
+    <div class="ws-dot" id="wsNavDot"></div>
+    <span id="wsNavLbl">--</span>
   </div>
 </div>
 
-<div class="card" style="margin-top:14px;">
-  <div class="card-hdr">
-    <span>Trading Hours</span>
-    <span class="sub">applied immediately, no restart needed</span>
-  </div>
-  <div class="card-body">
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
-      <div>
-        <label>Trade Start (HH:MM)</label>
-        <input type="time" id="tradeStart" style="width:100%;background:#080c15;border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--mono);font-size:12px;padding:8px 10px;outline:none;"/>
+<!-- PAGE -->
+<div class="page">
+  <div class="page-title">Configuration</div>
+
+  <div class="grid">
+
+    <!-- ── Auth ─────────────────────────────── -->
+    <div class="card full">
+      <div class="card-hdr">
+        <span class="card-icon">🔑</span>
+        <span class="card-title">Zerodha Auth</span>
+        <span class="card-sub"><span class="badge-restart">restart WS after save</span></span>
       </div>
-      <div>
-        <label>Trade End (HH:MM)</label>
-        <input type="time" id="tradeEnd" style="width:100%;background:#080c15;border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--mono);font-size:12px;padding:8px 10px;outline:none;"/>
-      </div>
-      <div>
-        <label>Force Exit (HH:MM)</label>
-        <input type="time" id="forceExit" style="width:100%;background:#080c15;border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--mono);font-size:12px;padding:8px 10px;outline:none;"/>
+      <div class="card-body">
+        <div class="frow">
+          <label>enctoken</label>
+          <textarea id="enctoken" rows="3" placeholder="Paste full enctoken from Zerodha cookie…"></textarea>
+          <div class="hint">Browser DevTools → Application → Cookies → kite.zerodha.com → enctoken</div>
+        </div>
+        <button class="btn btn-primary btn-block" id="saveAuthBtn" onclick="saveAuth()">Save Enctoken</button>
       </div>
     </div>
-    <button class="btn" id="saveTimeBtn" onclick="saveTimes()" style="margin-top:14px;">Save Trading Hours</button>
-  </div>
-</div>
+
+    <!-- ── Trading Hours ──────────────────────── -->
+    <div class="card">
+      <div class="card-hdr">
+        <span class="card-icon">🕐</span>
+        <span class="card-title">Trading Hours</span>
+        <span class="card-sub"><span class="badge-live">live — no restart</span></span>
+      </div>
+      <div class="card-body">
+        <div class="fg fg-3">
+          <div class="frow">
+            <label>Trade Start</label>
+            <input type="time" id="tradeStart"/>
+          </div>
+          <div class="frow">
+            <label>Trade End</label>
+            <input type="time" id="tradeEnd"/>
+          </div>
+          <div class="frow">
+            <label>Force Exit</label>
+            <input type="time" id="forceExit"/>
+          </div>
+        </div>
+        <div class="hint" style="margin-top:8px;">Force exit closes any open trade and stops new entries at this time.</div>
+        <button class="btn btn-primary btn-block" id="saveHoursBtn" onclick="saveHours()">Save Trading Hours</button>
+      </div>
+    </div>
+
+    <!-- ── Daily Limits ───────────────────────── -->
+    <div class="card">
+      <div class="card-hdr">
+        <span class="card-icon">📊</span>
+        <span class="card-title">Daily Limits</span>
+        <span class="card-sub"><span class="badge-live">live — no restart</span></span>
+      </div>
+      <div class="card-body">
+        <div class="fg fg-2">
+          <div class="frow">
+            <label>Max Daily Loss <span class="lunit">(₹)</span></label>
+            <input type="number" id="maxDailyLoss" step="100" min="0"/>
+          </div>
+          <div class="frow">
+            <label>Daily Profit Target <span class="lunit">(₹)</span></label>
+            <input type="number" id="dailyProfitTarget" step="100" min="0"/>
+          </div>
+          <div class="frow">
+            <label>Max Trades / Day</label>
+            <input type="number" id="maxTradesDay" step="1" min="1"/>
+          </div>
+          <div class="frow">
+            <label>SL Cooldown <span class="lunit">(secs)</span></label>
+            <input type="number" id="slCooldownSecs" step="10" min="0"/>
+          </div>
+        </div>
+        <button class="btn btn-primary btn-block" onclick="saveLimits()">Save Limits</button>
+      </div>
+    </div>
+
+    <!-- ── Spike Detection ───────────────────── -->
+    <div class="card">
+      <div class="card-hdr">
+        <span class="card-icon">⚡</span>
+        <span class="card-title">Spike Detection</span>
+        <span class="card-sub"><span class="badge-live">live — no restart</span></span>
+      </div>
+      <div class="card-body">
+        <div class="toggle-row">
+          <div class="toggle-info">
+            <div class="toggle-lbl">Auto Jump (ATR-based)</div>
+            <div class="toggle-sub">Uses Nifty ATR × multiplier instead of fixed %</div>
+          </div>
+          <label class="sw">
+            <input type="checkbox" id="autoJump"/>
+            <span class="slider"></span>
+          </label>
+        </div>
+        <div class="divider"></div>
+        <div class="fg fg-2">
+          <div class="frow">
+            <label>ATR Window <span class="lunit">(ticks)</span></label>
+            <input type="number" id="jumpAtrWindow" step="1" min="5"/>
+          </div>
+          <div class="frow">
+            <label>ATR Multiplier</label>
+            <input type="number" id="jumpAtrMultiplier" step="0.1" min="0.3"/>
+          </div>
+          <div class="frow">
+            <label>Min Spike <span class="lunit">(pts)</span></label>
+            <input type="number" id="jumpMinPts" step="0.5" min="1"/>
+          </div>
+          <div class="frow">
+            <label>Max Spike <span class="lunit">(pts)</span></label>
+            <input type="number" id="jumpMaxPts" step="1" min="5"/>
+          </div>
+          <div class="frow">
+            <label>Fixed Jump % <span class="lunit">(fallback)</span></label>
+            <input type="number" id="jumpPct" step="0.001" min="0.005"/>
+          </div>
+          <div class="frow">
+            <label>Confirm Sustain %</label>
+            <input type="number" id="confirmSustainPct" step="0.05" min="0.3" max="1"/>
+          </div>
+        </div>
+        <button class="btn btn-primary btn-block" onclick="saveSpike()">Save Spike Settings</button>
+      </div>
+    </div>
+
+    <!-- ── Confirmation ───────────────────────── -->
+    <div class="card">
+      <div class="card-hdr">
+        <span class="card-icon">✅</span>
+        <span class="card-title">Spike Confirmation</span>
+        <span class="card-sub"><span class="badge-live">live — no restart</span></span>
+      </div>
+      <div class="card-body">
+        <div class="fg fg-3">
+          <div class="frow">
+            <label>Fast Ticks</label>
+            <input type="number" id="confirmTicksFast" step="1" min="1"/>
+          </div>
+          <div class="frow">
+            <label>Mid Ticks</label>
+            <input type="number" id="confirmTicksMid" step="1" min="1"/>
+          </div>
+          <div class="frow">
+            <label>Slow Ticks</label>
+            <input type="number" id="confirmTicksSlow" step="1" min="1"/>
+          </div>
+          <div class="frow">
+            <label>ATR → Fast <span class="lunit">(≥)</span></label>
+            <input type="number" id="confirmAtrHigh" step="0.5" min="1"/>
+          </div>
+          <div class="frow">
+            <label>ATR → Slow <span class="lunit">(≤)</span></label>
+            <input type="number" id="confirmAtrLow" step="0.5" min="0.5"/>
+          </div>
+          <div class="frow">
+            <label>Momentum Window</label>
+            <input type="number" id="momentumWindow" step="1" min="2"/>
+          </div>
+        </div>
+        <div class="fg" style="margin-top:10px;">
+          <div class="frow">
+            <label>Momentum Min Score <span class="lunit">(fast entry threshold)</span></label>
+            <input type="number" id="momentumMin" step="1" min="1"/>
+          </div>
+        </div>
+        <div class="hint" style="margin-top:6px;">Fast/Slow ticks adapt based on current option ATR. Higher ATR = fewer confirm ticks needed.</div>
+        <button class="btn btn-primary btn-block" onclick="saveConfirm()">Save Confirm Settings</button>
+      </div>
+    </div>
+
+    <!-- ── Stop Loss ──────────────────────────── -->
+    <div class="card">
+      <div class="card-hdr">
+        <span class="card-icon">🛡️</span>
+        <span class="card-title">Stop Loss</span>
+        <span class="card-sub"><span class="badge-live">live — no restart</span></span>
+      </div>
+      <div class="card-body">
+        <div class="fg fg-2">
+          <div class="frow">
+            <label>Phase 1 SL <span class="lunit">(%)</span></label>
+            <input type="number" id="slPhase1Pct" step="0.5" min="1" max="50"/>
+          </div>
+          <div class="frow">
+            <label>Phase 1 Duration <span class="lunit">(secs)</span></label>
+            <input type="number" id="slPhase1Secs" step="5" min="5"/>
+          </div>
+          <div class="frow">
+            <label>Phase 2 SL <span class="lunit">(%)</span></label>
+            <input type="number" id="slPhase2Pct" step="0.5" min="1" max="50"/>
+          </div>
+          <div class="frow">
+            <label>Trade Timeout <span class="lunit">(secs)</span></label>
+            <input type="number" id="tradeTimeoutSecs" step="5" min="10"/>
+          </div>
+        </div>
+        <div class="hint" style="margin-top:8px;">SL tightens from Phase 1 → Phase 2 after the duration. Phase 2 also moves to breakeven once profit threshold is hit.</div>
+        <button class="btn btn-primary btn-block" onclick="saveSL()">Save SL Settings</button>
+      </div>
+    </div>
+
+    <!-- ── Trailing Stop ──────────────────────── -->
+    <div class="card">
+      <div class="card-hdr">
+        <span class="card-icon">📈</span>
+        <span class="card-title">Trailing Stop</span>
+        <span class="card-sub"><span class="badge-live">live — no restart</span></span>
+      </div>
+      <div class="card-body">
+        <div class="fg fg-2">
+          <div class="frow">
+            <label>Trail % Low <span class="lunit">(tight ATR)</span></label>
+            <input type="number" id="trailPctLow" step="0.5" min="1"/>
+          </div>
+          <div class="frow">
+            <label>Trail % High <span class="lunit">(wide ATR)</span></label>
+            <input type="number" id="trailPctHigh" step="0.5" min="1"/>
+          </div>
+          <div class="frow">
+            <label>ATR → Low Trail <span class="lunit">(≤)</span></label>
+            <input type="number" id="trailAtrLow" step="0.5" min="0.5"/>
+          </div>
+          <div class="frow">
+            <label>ATR → High Trail <span class="lunit">(≥)</span></label>
+            <input type="number" id="trailAtrHigh" step="0.5" min="1"/>
+          </div>
+          <div class="frow">
+            <label>Profit Trail Threshold <span class="lunit">(%)</span></label>
+            <input type="number" id="profitTrailThreshold" step="0.5" min="1"/>
+          </div>
+          <div class="frow">
+            <label>Default Trail % <span class="lunit">(before ATR ready)</span></label>
+            <input type="number" id="buyTrailPct" step="0.5" min="1"/>
+          </div>
+        </div>
+        <div class="hint" style="margin-top:8px;">Trail % is linearly interpolated from option ATR. Profit-tier trail activates once peak profit ≥ threshold.</div>
+        <button class="btn btn-primary btn-block" onclick="saveTrail()">Save Trail Settings</button>
+      </div>
+    </div>
+
+    <!-- ── Regression / Filters ───────────────── -->
+    <div class="card">
+      <div class="card-hdr">
+        <span class="card-icon">📉</span>
+        <span class="card-title">Regression &amp; Filters</span>
+        <span class="card-sub"><span class="badge-restart">regression window needs restart</span></span>
+      </div>
+      <div class="card-body">
+        <div class="fg fg-2">
+          <div class="frow">
+            <label>Regression Window <span class="lunit">(ticks)</span></label>
+            <input type="number" id="regressionWindow" step="1" min="5"/>
+          </div>
+          <div class="frow">
+            <label>Regression Slope Min</label>
+            <input type="number" id="regressionSlopeMin" step="0.05" min="0"/>
+          </div>
+          <div class="frow">
+            <label>Option Vol Factor <span class="lunit">(×avg)</span></label>
+            <input type="number" id="optionVolFactor" step="0.1" min="0.5"/>
+          </div>
+        </div>
+        <div class="hint" style="margin-top:8px;">⚠ Regression Window, Jump ATR Window, and Slow confirm ticks require a bot restart to resize internal tick buffers. All other params apply live.</div>
+        <button class="btn btn-primary btn-block" onclick="saveAdvanced()">Save Filter Settings</button>
+      </div>
+    </div>
+
+  </div><!-- /grid -->
+</div><!-- /page -->
 
 <div class="toast" id="toast"></div>
 
 <script>
 const socket = io();
 
+// ── Toast ──────────────────────────────────────────────────────
 function showToast(type, msg, ms = 3500) {
   const t = document.getElementById('toast');
   t.className = 'toast ' + type;
@@ -110,53 +472,192 @@ function showToast(type, msg, ms = 3500) {
   t._tid = setTimeout(() => t.classList.remove('show'), ms);
 }
 
-function save() {
-  const val = document.getElementById('enctoken').value.trim();
-  if (!val) { showToast('error', 'Enctoken cannot be empty'); return; }
-  document.getElementById('saveBtn').disabled = true;
-  socket.emit('update_config', { enctoken: val });
-}
+// ── Helpers ────────────────────────────────────────────────────
+function pad(n) { return String(n).padStart(2, '0'); }
+function val(id) { return document.getElementById(id).value; }
+function numVal(id) { const v = val(id).trim(); return v === '' ? undefined : Number(v); }
+function boolVal(id) { return document.getElementById(id).checked; }
+function setVal(id, v) { const el = document.getElementById(id); if (el && v != null) el.value = v; }
+function setChk(id, v) { const el = document.getElementById(id); if (el && v != null) el.checked = !!v; }
 
+function disableBtn(id) { const b = document.getElementById(id); if (b) b.disabled = true; }
+function enableBtn(id)  { const b = document.getElementById(id); if (b) b.disabled = false; }
+
+// ── WebSocket status in nav ────────────────────────────────────
+socket.on('ws_status', d => {
+  document.getElementById('wsNavDot').className = 'ws-dot' + (d.connected ? ' on' : '');
+  document.getElementById('wsNavLbl').textContent = d.connected ? 'Live' : 'Disconnected';
+});
+socket.on('state', d => {
+  if (d.ws_connected !== undefined) {
+    document.getElementById('wsNavDot').className = 'ws-dot' + (d.ws_connected ? ' on' : '');
+    document.getElementById('wsNavLbl').textContent = d.ws_connected ? 'Live' : 'Disconnected';
+  }
+});
+
+// ── Load config from server ────────────────────────────────────
 socket.on('connect', () => socket.emit('get_config'));
 
 socket.on('config_snapshot', d => {
+  // Auth
   if (d.enctoken) document.getElementById('enctoken').value = d.enctoken;
-  if (d.trade_start_h != null && d.trade_start_m != null)
-    document.getElementById('tradeStart').value =
-      String(d.trade_start_h).padStart(2,'0') + ':' + String(d.trade_start_m).padStart(2,'0');
-  if (d.trade_end_h != null && d.trade_end_m != null)
-    document.getElementById('tradeEnd').value =
-      String(d.trade_end_h).padStart(2,'0') + ':' + String(d.trade_end_m).padStart(2,'0');
-  if (d.force_exit_h != null && d.force_exit_m != null)
-    document.getElementById('forceExit').value =
-      String(d.force_exit_h).padStart(2,'0') + ':' + String(d.force_exit_m).padStart(2,'0');
+
+  // Trading hours
+  if (d.trade_start_h != null)
+    document.getElementById('tradeStart').value = pad(d.trade_start_h) + ':' + pad(d.trade_start_m);
+  if (d.trade_end_h != null)
+    document.getElementById('tradeEnd').value   = pad(d.trade_end_h)   + ':' + pad(d.trade_end_m);
+  if (d.force_exit_h != null)
+    document.getElementById('forceExit').value  = pad(d.force_exit_h)  + ':' + pad(d.force_exit_m);
+
+  // Daily limits
+  setVal('maxDailyLoss',       d.max_daily_loss);
+  setVal('dailyProfitTarget',  d.daily_profit_target);
+  setVal('maxTradesDay',       d.max_trades_day);
+  setVal('slCooldownSecs',     d.sl_cooldown_secs);
+
+  // Spike detection
+  setChk('autoJump',           d.auto_jump);
+  setVal('jumpAtrWindow',      d.jump_atr_window);
+  setVal('jumpAtrMultiplier',  d.jump_atr_multiplier);
+  setVal('jumpMinPts',         d.jump_min_pts);
+  setVal('jumpMaxPts',         d.jump_max_pts);
+  setVal('jumpPct',            d.jump_pct);
+  setVal('confirmSustainPct',  d.confirm_sustain_pct);
+
+  // Confirmation
+  setVal('confirmTicksFast',   d.confirm_ticks_fast);
+  setVal('confirmTicksMid',    d.confirm_ticks_mid);
+  setVal('confirmTicksSlow',   d.confirm_ticks_slow);
+  setVal('confirmAtrHigh',     d.confirm_atr_high);
+  setVal('confirmAtrLow',      d.confirm_atr_low);
+  setVal('momentumWindow',     d.momentum_window);
+  setVal('momentumMin',        d.momentum_min);
+
+  // Stop loss
+  setVal('slPhase1Pct',        d.sl_phase1_pct);
+  setVal('slPhase1Secs',       d.sl_phase1_secs);
+  setVal('slPhase2Pct',        d.sl_phase2_pct);
+  setVal('tradeTimeoutSecs',   d.trade_timeout_secs);
+
+  // Trail
+  setVal('trailPctLow',        d.trail_pct_low);
+  setVal('trailPctHigh',       d.trail_pct_high);
+  setVal('trailAtrLow',        d.trail_atr_low);
+  setVal('trailAtrHigh',       d.trail_atr_high);
+  setVal('profitTrailThreshold', d.profit_trail_threshold);
+  setVal('buyTrailPct',        d.buy_trail_pct);
+
+  // Advanced
+  setVal('regressionWindow',   d.regression_window);
+  setVal('regressionSlopeMin', d.regression_slope_min);
+  setVal('optionVolFactor',    d.option_vol_factor);
 });
 
-function saveTimes() {
-  const start = document.getElementById('tradeStart').value;
-  const end   = document.getElementById('tradeEnd').value;
-  const force = document.getElementById('forceExit').value;
-  if (!start || !end || !force) { showToast('error', 'All time fields are required'); return; }
+// ── Server response ────────────────────────────────────────────
+socket.on('config_saved', d => {
+  enableBtn('saveAuthBtn');
+  enableBtn('saveHoursBtn');
+
+  const needsRestart = d.restart_needed && d.restart_needed.length;
+  const liveKeys     = d.live_updated   && d.live_updated.length ? d.live_updated : [];
+
+  if (needsRestart) {
+    showToast('warn',
+      `Saved — restart bot to fully apply: ${d.restart_needed.join(', ')}`
+      + (liveKeys.length ? `  |  Live: ${liveKeys.slice(0,3).join(', ')}` : ''));
+  } else if (liveKeys.length) {
+    const preview = liveKeys.slice(0, 4).join(', ') + (liveKeys.length > 4 ? '…' : '');
+    showToast('success', `Applied live: ${preview}`);
+  } else {
+    showToast('success', 'Settings saved');
+  }
+});
+
+// ── Save functions ─────────────────────────────────────────────
+function saveAuth() {
+  const token = val('enctoken').trim();
+  if (!token) { showToast('error', 'Enctoken cannot be empty'); return; }
+  disableBtn('saveAuthBtn');
+  socket.emit('update_config', { enctoken: token });
+}
+
+function saveHours() {
+  const start = val('tradeStart'), end = val('tradeEnd'), force = val('forceExit');
+  if (!start || !end || !force) { showToast('error', 'All three time fields are required'); return; }
   const [sh, sm] = start.split(':').map(Number);
   const [eh, em] = end.split(':').map(Number);
   const [fh, fm] = force.split(':').map(Number);
   if (sh * 60 + sm >= eh * 60 + em) { showToast('error', 'Trade End must be after Trade Start'); return; }
-  document.getElementById('saveTimeBtn').disabled = true;
-  socket.emit('update_rc', {
+  if (fh * 60 + fm > eh * 60 + em)  { showToast('error', 'Force Exit should be ≤ Trade End'); return; }
+  disableBtn('saveHoursBtn');
+  socket.emit('update_config', {
     trade_start_h: sh, trade_start_m: sm,
     trade_end_h:   eh, trade_end_m:   em,
     force_exit_h:  fh, force_exit_m:  fm,
   });
-  showToast('success', `Hours set: ${start}–${end}, force exit ${force}`);
-  setTimeout(() => document.getElementById('saveTimeBtn').disabled = false, 1000);
 }
 
-socket.on('config_saved', d => {
-  document.getElementById('saveBtn').disabled = false;
-  const needsRestart = d.restart_needed && d.restart_needed.length;
-  showToast(needsRestart ? 'warn' : 'success',
-    needsRestart ? 'Saved — restart WS to apply' : 'Enctoken saved successfully');
-});
+function saveLimits() {
+  socket.emit('update_config', {
+    max_daily_loss:       numVal('maxDailyLoss'),
+    daily_profit_target:  numVal('dailyProfitTarget'),
+    max_trades_day:       numVal('maxTradesDay'),
+    sl_cooldown_secs:     numVal('slCooldownSecs'),
+  });
+}
+
+function saveSpike() {
+  socket.emit('update_config', {
+    auto_jump:            boolVal('autoJump'),
+    jump_atr_window:      numVal('jumpAtrWindow'),
+    jump_atr_multiplier:  numVal('jumpAtrMultiplier'),
+    jump_min_pts:         numVal('jumpMinPts'),
+    jump_max_pts:         numVal('jumpMaxPts'),
+    jump_pct:             numVal('jumpPct'),
+    confirm_sustain_pct:  numVal('confirmSustainPct'),
+  });
+}
+
+function saveConfirm() {
+  socket.emit('update_config', {
+    confirm_ticks_fast:  numVal('confirmTicksFast'),
+    confirm_ticks_mid:   numVal('confirmTicksMid'),
+    confirm_ticks_slow:  numVal('confirmTicksSlow'),
+    confirm_atr_high:    numVal('confirmAtrHigh'),
+    confirm_atr_low:     numVal('confirmAtrLow'),
+    momentum_window:     numVal('momentumWindow'),
+    momentum_min:        numVal('momentumMin'),
+  });
+}
+
+function saveSL() {
+  socket.emit('update_config', {
+    sl_phase1_pct:     numVal('slPhase1Pct'),
+    sl_phase1_secs:    numVal('slPhase1Secs'),
+    sl_phase2_pct:     numVal('slPhase2Pct'),
+    trade_timeout_secs:numVal('tradeTimeoutSecs'),
+  });
+}
+
+function saveTrail() {
+  socket.emit('update_config', {
+    trail_pct_low:          numVal('trailPctLow'),
+    trail_pct_high:         numVal('trailPctHigh'),
+    trail_atr_low:          numVal('trailAtrLow'),
+    trail_atr_high:         numVal('trailAtrHigh'),
+    profit_trail_threshold: numVal('profitTrailThreshold'),
+    buy_trail_pct:          numVal('buyTrailPct'),
+  });
+}
+
+function saveAdvanced() {
+  socket.emit('update_config', {
+    regression_window:    numVal('regressionWindow'),
+    regression_slope_min: numVal('regressionSlopeMin'),
+    option_vol_factor:    numVal('optionVolFactor'),
+  });
+}
 </script>
 </body>
 </html>

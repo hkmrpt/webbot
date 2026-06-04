@@ -167,10 +167,16 @@ class MarketRegimeDetector:
       • Tighten / loosen trail via regime passed to ExitBrain
     """
 
-    WINDOW        = 20    # ticks for slope calculation
-    TREND_SLOPE   = 0.15  # |slope| above this = trending
+    WINDOW        = 30    # was 20 — wider window = more stable slope
+    TREND_SLOPE   = 0.20  # was 0.15 — stricter: only clear trends qualify
     CHOP_ATR_CAP  = 0.5   # ATR/price% below this + flat slope = choppy
     VOLATILE_ATR  = 0.8   # ATR/price% above this = volatile
+    CONFIRM_TICKS = 3     # regime must sustain this many ticks before changing
+
+    def __init__(self):
+        self._last_classified = "unknown"
+        self._candidate       = "unknown"
+        self._candidate_count = 0
 
     def classify(self, nifty_ticks: list) -> str:
         if len(nifty_ticks) < self.WINDOW:
@@ -193,12 +199,24 @@ class MarketRegimeDetector:
         atr_pct = atr / mean_p * 100
 
         if atr_pct >= self.VOLATILE_ATR:
-            return "volatile"
-        if slope_norm >= self.TREND_SLOPE:
-            return "trending_up"
-        if slope_norm <= -self.TREND_SLOPE:
-            return "trending_down"
-        return "choppy"
+            raw = "volatile"
+        elif slope_norm >= self.TREND_SLOPE:
+            raw = "trending_up"
+        elif slope_norm <= -self.TREND_SLOPE:
+            raw = "trending_down"
+        else:
+            raw = "choppy"
+
+        # Regime persistence: only switch after CONFIRM_TICKS consecutive ticks
+        if raw == self._candidate:
+            self._candidate_count += 1
+        else:
+            self._candidate       = raw
+            self._candidate_count = 1
+
+        if self._candidate_count >= self.CONFIRM_TICKS:
+            self._last_classified = raw
+        return self._last_classified
 
 
 # ── Feature Builder ───────────────────────────────────────────────────────────
@@ -287,9 +305,9 @@ class MarketBrain:
     """
 
     # Score threshold: below this → block entry (only when model is ready)
-    MIN_ENTRY_SCORE   = 0.42
+    MIN_ENTRY_SCORE   = 0.52          # was 0.42 — require higher confidence
     # PnL% to call a trade a "win" for learning purposes
-    WIN_THRESHOLD_PCT = 1.5
+    WIN_THRESHOLD_PCT = 0.8           # was 1.5 — account for transaction costs
 
     def __init__(self):
         self._lr       = OnlineLR()

@@ -40,12 +40,13 @@ from config import (
     SLOW_MOVE_TRAIL_CAP, FAST_MOVE_TRAIL_FLOOR,
     SLOW_MOVE_TIMEOUT_SECS, SLOW_MOVE_MIN_PROFIT,
     FAST_MOVE_TIMEOUT_SECS, FAST_MOVE_MIN_PROFIT,
+    PARTIAL_BOOKING_ENABLED, PARTIAL_BOOKING_TARGETS,
 )
 
 _csv_lock = threading.Lock()
 
 CSV_FIELDS = [
-    "date", "time", "side", "entry", "exit_price",
+    "date", "time", "symbol", "option_symbol", "side", "entry", "exit_price",
     "qty", "lot_qty",
     "pnl", "pnl_pct",
     "reason",
@@ -67,6 +68,8 @@ def write_trade_csv(result: dict):
     row  = {
         "date":                 now.strftime("%Y-%m-%d"),
         "time":                 now.strftime("%H:%M:%S"),
+        "symbol":               result.get("symbol",           ""),
+        "option_symbol":        result.get("option_symbol",    ""),
         "side":                 result.get("side",             ""),
         "entry":                result.get("entry",            ""),
         "exit_price":           result.get("exit_price",       ""),
@@ -178,14 +181,22 @@ class BuyExitStrategy:
         self._opt_price_hist     = deque(maxlen=OPTION_ATR_PERIOD + 1)
         self._trail_pct_override = None
         self._brain              = ExitBrain()   # AI brain — persists across trades
+        self._partial_done: list = []            # indices of partial targets already booked
+        self._original_qty: int  = 1             # qty at open (before any partial sells)
 
     def open_leg(
         self,
-        side:               str,
-        entry_price:        float,
-        sl_pct_override:    float | None = None,
-        trail_pct_override: float | None = None,
-        seed_prices:        list  | None = None,
+        side:                    str,
+        entry_price:             float,
+        sl_pct_override:         float | None = None,
+        trail_pct_override:      float | None = None,
+        sl_pct_p2_override:      float | None = None,
+        sl_phase1_secs_override: float | None = None,
+        timeout_secs_override:   float | None = None,
+        seed_prices:             list  | None = None,
+        symbol:                  str         = "",
+        option_symbol:           str         = "",
+        qty_override:            int  | None = None,
         **_kwargs,
     ) -> dict:
         sl_pct = sl_pct_override if sl_pct_override is not None else SL_PHASE1_PCT
@@ -200,10 +211,16 @@ class BuyExitStrategy:
                 self._opt_price_hist.append(p)
         self._opt_price_hist.append(entry_price)
 
+        qty = qty_override if (qty_override is not None and qty_override >= 1) else BUY_QTY
+        self._partial_done  = []
+        self._original_qty  = qty
+
         self._leg = {
             "side":                 side,
+            "symbol":               symbol,
+            "option_symbol":        option_symbol,
             "entry":                entry_price,
-            "qty":                  BUY_QTY,
+            "qty":                  qty,
             "sl":                   sl,
             "sl_pct":               sl_pct,
             "trail_pct":            init_trail,
@@ -219,11 +236,15 @@ class BuyExitStrategy:
             "phase2":               False,
             "breakeven_moved":      False,
             "move_type":            "slow",
+            # Per-stock AI overrides (None = use config defaults)
+            "_sl_pct_p2":           sl_pct_p2_override,
+            "_sl_phase1_secs":      sl_phase1_secs_override,
+            "_timeout_secs":        timeout_secs_override,
             "open":                 True,
         }
         self._open_time = datetime.now()
 
-        return {"sl": sl, "qty": BUY_QTY, "sl_pct": sl_pct, "trail_pct": init_trail}
+        return {"sl": sl, "qty": qty, "sl_pct": sl_pct, "trail_pct": init_trail}
 
     def on_price(self, price: float):
         if not self._leg or not self._leg["open"]:
@@ -249,12 +270,14 @@ class BuyExitStrategy:
         if not leg["phase2"] and price > leg["entry"]:
             leg["phase2"] = True
 
-        # Tighten SL after phase 1 period
-        if elapsed >= SL_PHASE1_SECS and leg["sl_pct"] > SL_PHASE2_PCT:
-            new_sl = round(leg["entry"] * (1 - SL_PHASE2_PCT / 100), 2)
+        # Tighten SL after phase 1 period (use per-stock overrides if set)
+        _phase1_secs = leg["_sl_phase1_secs"] if leg["_sl_phase1_secs"] is not None else SL_PHASE1_SECS
+        _sl_p2       = leg["_sl_pct_p2"]      if leg["_sl_pct_p2"]      is not None else SL_PHASE2_PCT
+        if elapsed >= _phase1_secs and leg["sl_pct"] > _sl_p2:
+            new_sl = round(leg["entry"] * (1 - _sl_p2 / 100), 2)
             if new_sl > leg["sl"]:
                 leg["sl"]     = new_sl
-                leg["sl_pct"] = SL_PHASE2_PCT
+                leg["sl_pct"] = _sl_p2
 
         peak_pct = leg["peak_profit_pct"]
 
@@ -316,9 +339,42 @@ class BuyExitStrategy:
             leg["trail_price"] = max(new_trail, prev_trail)
 
         # Exit checks
-        # Timeout: brain adapts threshold based on move speed
-        timeout_secs   = FAST_MOVE_TIMEOUT_SECS if move_type == "fast" else SLOW_MOVE_TIMEOUT_SECS
-        min_profit_pct = FAST_MOVE_MIN_PROFIT    if move_type == "fast" else SLOW_MOVE_MIN_PROFIT
+        # Per-stock timeout override, or default move-type based timeout
+        if leg["_timeout_secs"] is not None:
+            timeout_secs   = leg["_timeout_secs"]
+            min_profit_pct = SLOW_MOVE_MIN_PROFIT    # keep profit floor
+        else:
+            timeout_secs   = FAST_MOVE_TIMEOUT_SECS if move_type == "fast" else SLOW_MOVE_TIMEOUT_SECS
+            min_profit_pct = FAST_MOVE_MIN_PROFIT    if move_type == "fast" else SLOW_MOVE_MIN_PROFIT
+
+        # ── Partial profit booking ──────────────────────────────────────────────
+        # Check before full exit — book a fraction at profit milestones,
+        # then continue trailing the rest with a tightened SL.
+        if PARTIAL_BOOKING_ENABLED and leg["qty"] > 1:
+            for i, (target_pct, fraction) in enumerate(PARTIAL_BOOKING_TARGETS):
+                if i not in self._partial_done and peak_pct >= target_pct:
+                    sell_qty = max(1, round(leg["qty"] * fraction))
+                    # Keep at least 1 lot running
+                    if sell_qty < leg["qty"]:
+                        self._partial_done.append(i)
+                        leg["qty"] -= sell_qty
+                        # After partial, tighten SL to lock in the gained profit
+                        lock_pct     = max(BREAKEVEN_TRIGGER_PCT, target_pct * 0.40)
+                        locked_sl    = round(leg["entry"] * (1 + lock_pct / 100), 2)
+                        leg["sl"]    = max(leg["sl"], locked_sl)
+                        return {
+                            "event_type":      "partial",
+                            "partial_qty":     sell_qty,
+                            "remaining_qty":   leg["qty"],
+                            "price":           price,
+                            "peak_profit_pct": peak_pct,
+                            "reason":          f"partial_{i + 1}",
+                            "side":            leg["side"],
+                            "symbol":          leg.get("symbol", ""),
+                            "option_symbol":   leg.get("option_symbol", ""),
+                            "entry":           leg["entry"],
+                            "new_sl":          leg["sl"],
+                        }
 
         reason = None
 
@@ -357,6 +413,8 @@ class BuyExitStrategy:
 
         result = {
             "side":                 leg["side"],
+            "symbol":               leg.get("symbol", ""),
+            "option_symbol":        leg.get("option_symbol", ""),
             "entry":                leg["entry"],
             "exit_price":           exit_price,
             "qty":                  leg["qty"],
@@ -421,3 +479,5 @@ class BuyExitStrategy:
         self._open_time          = None
         self._opt_price_hist     = deque(maxlen=OPTION_ATR_PERIOD + 1)
         self._trail_pct_override = None
+        self._partial_done       = []
+        self._original_qty       = 1

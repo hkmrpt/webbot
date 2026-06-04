@@ -1,5 +1,5 @@
 # ═══════════════════════════════════════════════════════════════
-# OPTION BUY ROBOT  v8  ──  config.py
+# OPTION BUY ROBOT  v8.5  ──  config.py
 # ═══════════════════════════════════════════════════════════════
 
 # ── Trading Mode ─────────────────────────────────────────────
@@ -16,9 +16,15 @@ ZERODHA_CONFIG = {
     "user_agent":    "kite3-web",
     "version":       "3.0.0",
     "websocket_url": "wss://ws.zerodha.com/",
+    # Optional — needed for Zerodha watchlist API (/api/marketwatch)
+    "csrf_token":    "",
+    "app_uuid":      "",
 }
 
 SUBSCRIBE_INSTRUMENTS = [256265]   # NIFTY 50 index token
+
+# ── Index Tokens ──────────────────────────────────────────────
+BANKNIFTY_TOKEN = 260105           # BANKNIFTY index token
 
 # ── Position Sizing ───────────────────────────────────────────
 LOT_SIZE            = 65
@@ -30,16 +36,47 @@ MAX_RISK_PER_TRADE  = 0.01
 # dynamic_jump_pts = Nifty tick ATR  × JUMP_ATR_MULTIPLIER
 # Result is clamped to [JUMP_MIN_PTS, JUMP_MAX_PTS].
 AUTO_JUMP           = True         # True = ATR-based | False = fixed JUMP_PCT
-JUMP_ATR_WINDOW     = 30           # rolling tick window for Nifty ATR
-JUMP_ATR_MULTIPLIER = 1.2          # ATR × this = spike threshold
-JUMP_MIN_PTS        = 4.0          # minimum spike threshold (pts)
-JUMP_MAX_PTS        = 20.0         # maximum spike threshold (pts)
+JUMP_ATR_WINDOW     = 30           # rolling tick window for live ATR (fallback only)
+JUMP_ATR_MULTIPLIER = 1.2          # ATR × this = spike threshold (live fallback)
+JUMP_MIN_PTS        = 2.0          # absolute minimum spike threshold (pts)
+JUMP_MAX_PTS        = 60.0         # absolute maximum spike threshold (pts)
+
+# ── Historical ATR-based spike threshold (primary method) ─────
+# Uses last HIST_ATR_DAYS daily candles to measure typical intraday range.
+# Spike threshold = avg_daily_range × HIST_ATR_SPIKE_FRACTION
+# e.g. RELIANCE avg daily range = 40pts  →  threshold = 40 × 0.18 = 7.2pts
+#      NIFTY    avg daily range = 200pts →  threshold = 200 × 0.18 = 36pts
+HIST_ATR_DAYS           = 7        # days of history to measure daily range
+HIST_ATR_SPIKE_FRACTION = 0.18     # fraction of daily range = spike threshold
+
+# ── Spike speed (time-based validation) ──────────────────────
+# A real spike must be fast — big move in a short time.
+# Speed  = pts moved / seconds elapsed (pts/sec)
+# Window = how many seconds back to measure the spike move
+# A move that takes longer than SPIKE_MAX_SECS is treated as a trend, not spike.
+SPIKE_LOOKBACK_SECS     = 10       # window (seconds) to measure cumulative move
+SPIKE_MAX_SECS          = 20       # move taking longer than this = trend, not spike
+SPIKE_MIN_SPEED_PCT_SEC = 0.02     # min speed as % of price per second
+                                   # e.g. NIFTY@22000 → 0.02% = 4.4 pts/sec min
+                                   #      RELIANCE@1500 → 0.02% = 0.30 pts/sec min
 
 # Legacy fixed threshold (used when AUTO_JUMP = False)
 JUMP_PCT            = 0.02         # % of Nifty price
 
+# ── Trend Detection (slow uptrend / downtrend) ────────────────
+# Detects sustained directional movement over multiple ticks.
+# Works alongside spike detection — three modes total:
+#   1. Sudden spike  — single tick > ATR threshold
+#   2. Slow uptrend  — consistent up-ticks → buy CE
+#   3. Downtrend     — consistent down-ticks → buy PE
+TREND_ENABLED           = True    # enable slow-trend entries
+TREND_WINDOW            = 12      # ticks to evaluate (last N ticks)
+TREND_MIN_MOVE_PCT      = 0.25    # min cumulative move % to qualify
+TREND_CONSISTENCY_PCT   = 0.70    # % of ticks that must go in same dir
+TREND_COOLDOWN_TICKS    = 25      # ticks to wait before re-firing trend
+
 # ── Spike Confirmation ────────────────────────────────────────
-CONFIRM_SUSTAIN_PCT = 0.70         # spike must hold this fraction of jump_pts
+CONFIRM_SUSTAIN_PCT = 0.85         # was 0.70 — spike must hold more before confirming
 
 CONFIRM_ATR_HIGH    = 5.0
 CONFIRM_ATR_LOW     = 2.0
@@ -48,77 +85,81 @@ CONFIRM_TICKS_MID   = 3
 CONFIRM_TICKS_SLOW  = 4
 
 MOMENTUM_WINDOW     = 5
-MOMENTUM_MIN        = 4
+MOMENTUM_MIN        = 10            # was 7 — require stronger momentum
 
 # ── Stop Loss ─────────────────────────────────────────────────
 BUY_SL_PCT          = 5.0          # initial SL (fallback)
-SL_PHASE1_PCT       = 15.0         # wide SL for first N seconds
-SL_PHASE1_SECS      = 30           # seconds before tightening
-SL_PHASE2_PCT       = 8.0          # tightened SL after phase 1
+SL_PHASE1_PCT       = 12.0         # was 15.0
+SL_PHASE1_SECS      = 15           # was 30 — tighten faster (most trades done in 3-4s)
+SL_PHASE2_PCT       = 6.0          # was 8.0
 
 # ── NIFTY Reversal Exit ───────────────────────────────────────
-# If NIFTY drops back below entry price (CE) or rises above (PE),
-# the spike has failed — exit the option immediately.
 NIFTY_REVERSAL_EXIT = True
+# Reversal must exceed this fraction of the spike threshold before triggering.
+# e.g. spike=36pts, buffer=0.35 → NIFTY must move back 12.6pts before exit.
+# Prevents hair-trigger exits on 1-tick noise bounces.
+NIFTY_REVERSAL_BUFFER_PCT = 0.35   # fraction of jump_threshold
+# Don't exit on reversal if option is already this far in profit (trust the trail).
+NIFTY_REVERSAL_PROFIT_SKIP_PCT = 4.0  # option profit % above which reversal is ignored
 
 # ── Trail ─────────────────────────────────────────────────────
 OPTION_ATR_PERIOD   = 10
 TRAIL_ATR_HIGH      = 5.0
 TRAIL_ATR_LOW       = 2.0
-TRAIL_PCT_HIGH      = 35.0
-TRAIL_PCT_LOW       = 15.0
-BUY_TRAIL_PCT       = 25.0         # default trail %
+TRAIL_PCT_HIGH      = 22.0         # was 35 — tighter ceiling protects gains
+TRAIL_PCT_LOW       = 6.0          # was 15 — much tighter floor
+BUY_TRAIL_PCT       = 12.0         # was 25 — default trail tightened
 
 # ── Profit-Tier Trail ─────────────────────────────────────────
-# Proportional: small profit → tight trail (protect it)
-#               large profit → wider trail (let it run)
-PROFIT_TRAIL_THRESHOLD_PCT = 5.0
+PROFIT_TRAIL_THRESHOLD_PCT = 3.0      # was 5.0 — tighter trail activates sooner
 
 PROFIT_TIER_TRAIL = [
-    (5.0,   4.0),   # profit ≥ 5%  → trail 4%  (locks ~1% profit)
-    (10.0,  6.0),   # profit ≥ 10% → trail 6%  (locks ~4% profit)
-    (20.0, 10.0),   # profit ≥ 20% → trail 10% (locks ~10% profit)
-    (30.0, 15.0),   # profit ≥ 30% → trail 15% (locks ~15% profit)
+    (3.0,   3.0),   # peak ≥ 3%  → trail 3%  (was 5%→4%)
+    (6.0,   4.5),   # peak ≥ 6%  → trail 4.5%
+    (12.0,  7.0),   # peak ≥ 12% → trail 7%  (was 10%→6%)
+    (20.0, 10.0),   # peak ≥ 20% → trail 10%
+    (35.0, 14.0),   # peak ≥ 35% → trail 14%
 ]
 
 # ── Profit-Lock SL tiers ──────────────────────────────────────
-# Moves SL above entry to lock in profit at key milestones.
-# Format: (peak_profit_pct_trigger, sl_lock_pct_above_entry)
 PROFIT_LOCK_TIERS = [
     (10.0,  3.0),   # peak ≥ 10% → SL at entry + 3%
     (20.0,  8.0),   # peak ≥ 20% → SL at entry + 8%
     (30.0, 15.0),   # peak ≥ 30% → SL at entry + 15%
 ]
 
-# ── Trail ratchet (never widen once tightened) ────────────────
-# Disabled: proportional trail intentionally widens with profit growth
-TRAIL_RATCHET_ENABLED = False
+# ── Trail ratchet ─────────────────────────────────────────────
+TRAIL_RATCHET_ENABLED = True          # was False — ratchet locks in tighter trail as profit grows
 
-# ── Breakeven + Time-based trail ─────────────────────────────
-BREAKEVEN_TRIGGER_PCT     = 3.0    # move SL to entry once peak profit hits this %
-TRAIL_TIME_START_PCT      = 15.0   # trail % when time-trail first activates
-TRAIL_TIME_TIGHTEN_SECS   = 60     # tighten trail every N seconds after activation
-TRAIL_TIME_TIGHTEN_STEP   = 2.0    # tighten by this % each interval
-TRAIL_TIME_MIN_PCT        = 5.0    # minimum trail floor
+# ── Breakeven ─────────────────────────────────────────────────
+BREAKEVEN_TRIGGER_PCT     = 3.0
+
+# ── Time-based trail tightening ───────────────────────────────
+TRAIL_TIME_START_PCT      = 10.0   # was 15.0
+TRAIL_TIME_TIGHTEN_SECS   = 20     # was 60 — tighten every 20s, not 60s
+TRAIL_TIME_TIGHTEN_STEP   = 1.5    # was 2.0
+TRAIL_TIME_MIN_PCT        = 3.0    # was 5.0
 
 # ── Move Type Detection ───────────────────────────────────────
-# Velocity = avg absolute pts/tick over last N option price ticks.
-# Fast move = market spiking quickly  → wider trail, more time
-# Slow move = market creeping slowly  → tight trail, exit sooner
-MOVE_VELOCITY_WINDOW   = 5      # ticks to measure velocity
-FAST_MOVE_VELOCITY     = 2.0    # avg pts/tick — above this = fast move
+MOVE_VELOCITY_WINDOW   = 5         # ticks to measure velocity
+FAST_MOVE_VELOCITY     = 2.0       # avg pts/tick — above = fast move
 
-SLOW_MOVE_TRAIL_CAP    = 5.0    # trail capped here on slow moves (protect small gains)
-FAST_MOVE_TRAIL_FLOOR  = 12.0   # trail floored here on fast moves (let it run)
+SLOW_MOVE_TRAIL_CAP    = 5.0       # trail cap on slow moves
+FAST_MOVE_TRAIL_FLOOR  = 12.0      # trail floor on fast moves
 
-SLOW_MOVE_TIMEOUT_SECS = 45     # exit sooner if slow — don't hold losers
-SLOW_MOVE_MIN_PROFIT   = 1.0    # min profit % to stay in after slow timeout
-FAST_MOVE_TIMEOUT_SECS = 120    # more time for fast moves
-FAST_MOVE_MIN_PROFIT   = 3.0    # min profit % to stay in after fast timeout
+SLOW_MOVE_TIMEOUT_SECS = 45
+SLOW_MOVE_MIN_PROFIT   = 1.0
+FAST_MOVE_TIMEOUT_SECS = 120
+FAST_MOVE_MIN_PROFIT   = 3.0
 
-# ── Timeout (legacy fallback) ─────────────────────────────────
-TRADE_TIMEOUT_SECS        = 60     # seconds before timeout check
+# ── Timeout ───────────────────────────────────────────────────
+TRADE_TIMEOUT_SECS        = 60
 TRADE_TIMEOUT_MIN_PROFIT  = 1.0    # % — exit if profit below this after timeout
+
+# ── Consolidation Range Detection ─────────────────────────────
+RANGE_WINDOW     = 20              # ticks for range detection
+RANGE_MIN_TICKS  = 10              # minimum ticks before range is valid
+RANGE_MAX_POINTS = 50.0            # max range width in points
 
 # ── Trade Controls ────────────────────────────────────────────
 SL_COOLDOWN_SECS    = 180
@@ -146,3 +187,43 @@ FORCE_EXIT_M        = 25
 
 # ── Trade Log ─────────────────────────────────────────────────
 TRADE_LOG           = "trade_log.csv"
+
+# ── Advanced Entry Filters (v8.5) ─────────────────────────────
+# Breakout filter — spike must clear the prior consolidation range
+BREAKOUT_FILTER_ENABLED = True
+BREAKOUT_RANGE_WINDOW   = 15       # was 30 — shorter window suits trending markets
+
+# Volatility gate — block choppy / very-high-vol markets
+VOL_GATE_ENABLED    = True
+VOL_LOW_ATR_PTS     = 2.0          # below this = low-vol breakout setup (boost)
+VOL_HIGH_ATR_PTS    = 10.0         # above this = chaotic (caution)
+
+# ── Ensemble Entry Brain (v8.5+) ──────────────────────────────────────────────
+# Master confidence score that combines all signals. Replaces standalone AI gate.
+ENSEMBLE_ENABLED    = True
+ENSEMBLE_MIN_SCORE  = 0.52         # below this → block (after MIN_TRAIN_TRADES)
+
+# ── Options Quality Filter ────────────────────────────────────────────────────
+# Cheap options = gamma traps. Expensive options = slow movers. Sweet spot wins.
+OPTION_MIN_PRICE    = 8.0          # below this → hard block
+OPTION_SWEET_MIN    = 18.0         # sweet spot start (score = 1.0)
+OPTION_SWEET_MAX    = 350.0        # sweet spot end
+OPTION_MAX_PRICE    = 700.0        # above this → strong caution
+
+# ── Partial Profit Booking ────────────────────────────────────────────────────
+# At each profit milestone, sell a fraction of the position. Trail the rest.
+PARTIAL_BOOKING_ENABLED = True
+PARTIAL_BOOKING_TARGETS = [
+    (8.0,  0.50),   # peak ≥ 8%  → sell 50% of remaining lots
+    (18.0, 0.25),   # peak ≥ 18% → sell 25% of remaining lots
+]
+
+# ── Smart Cooldown (reason-aware, replaces flat SL_COOLDOWN_SECS) ─────────────
+SMART_COOLDOWN_ENABLED    = True
+COOLDOWN_AFTER_SL         = 180    # SL hit — max caution (was flat 180s)
+COOLDOWN_AFTER_TRAIL_WIN  = 30     # Profitable trail exit — trend may continue
+COOLDOWN_AFTER_TRAIL_LOSS = 90     # Unprofitable trail — moderate caution
+COOLDOWN_AFTER_TIMEOUT_WIN  = 10   # Timeout but in profit — quick reset
+COOLDOWN_AFTER_TIMEOUT_LOSS = 60   # Timeout loss — investigate before re-entry
+COOLDOWN_AFTER_AI_EXIT    = 45     # AI-triggered exit — moderate caution
+COOLDOWN_AFTER_REVERSAL   = 60     # NIFTY reversal exit — wait for re-establishment

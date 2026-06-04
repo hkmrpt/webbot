@@ -6,7 +6,16 @@
       "Read(//mnt/c/Users/hkmrp/PycharmProjects/**)",
       "Bash(python -c ':*)",
       "Bash(python -c \"import buy_app; print\\('buy_app OK'\\)\")",
-      "Bash(python -c \"import buy_app; print\\('OK'\\)\")"
+      "Bash(python -c \"import buy_app; print\\('OK'\\)\")",
+      "Bash(ls:*)",
+      "Bash(python -c \"import config; print\\(dir\\(config\\)\\)\")",
+      "Bash(python -c \"import ast, sys; ast.parse\\(open\\('buy_app.py'\\).read\\(\\)\\); print\\('buy_app.py: OK'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('buy_app.py', encoding='utf-8'\\).read\\(\\)\\); print\\('buy_app.py: OK'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('buy_app.py', encoding='utf-8'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "Bash(python:*)",
+      "Bash(grep -v '^--$')",
+      "Bash(python3:*)",
+      "Bash(node:*)"
     ]
   }
 }

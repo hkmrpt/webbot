@@ -6,7 +6,13 @@ const UP = '#00e87a', DN = '#ff3d5c';
 const AX_W = 60, AX_H = 20;
 
 let TF = 5, chartMode = 'nifty';
+let chartType = 'candle';  // 'candle' | 'ha' | 'line' | 'area'
+let _mainH = 0;            // main chart height, set at top of draw()
 let niftyHist = [], optHist = [];
+let stockSpotHist = [], stockCeHist = [], stockPeHist = [];
+// Pre-built OHLC candles from Zerodha historical API (1-min resolution)
+let stockSpotCandles = [], stockCeCandles = [], stockPeCandles = [];
+let _activeStockSym = null;   // which stock is currently shown in the chart
 let candles = [], markers = [];
 let lastP = null, candleW = 10, viewOff = 0;
 let mX = -1, mY = -1, drag = false, dX = 0, dOff = 0;
@@ -24,11 +30,10 @@ let cfgCooldownSecs = 180;
 let confirmTicks = 3;
 
 let isRunning = false, logInit = false;
-let currentMode = 'demo';
+let currentMode  = 'demo';
+let _lastCapital = 100000;
 let lastSkipReason = null, lastSkipTs = 0;
 
-// Local checkbox state
-let tradeCE = false, tradePE = false;
 let activeSidesFromServer = [];
 
 // ── Resize ────────────────────────────────────────────────────
@@ -39,32 +44,300 @@ function resize() {
 }
 new ResizeObserver(resize).observe(wrap);
 
-// ── Side checkbox toggle ──────────────────────────────────────
-function toggleSide(side) {
-  if (isRunning) return;
-  if (side === 'CE') tradeCE = !tradeCE;
-  else               tradePE = !tradePE;
-  renderSideUI();
+// ── Watchlist ─────────────────────────────────────────────────
+let _watchlistStocks = [];
+let _wlSearchTimer   = null;
+let _selectedStocks  = new Set();   // symbols ticked for trading
+
+async function loadWatchlist() {
+  try {
+    const data = await fetch('/api/watchlist').then(r => r.json());
+    _watchlistStocks = Array.isArray(data) ? data : [];
+    renderWatchlist();
+  } catch(e) { /* silent */ }
 }
 
-function renderSideUI() {
-  const ceChk     = document.getElementById('ceChk');
-  const peChk     = document.getElementById('peChk');
-  const ceRow     = document.getElementById('ceRow');
-  const peRow     = document.getElementById('peRow');
-  const bothBadge = document.getElementById('bothBadge');
-  const topBar    = document.getElementById('topSidesBar');
+function renderWatchlist() {
+  const list = document.getElementById('wlList');
+  const cnt  = document.getElementById('wlCount');
+  if (!list) return;
+  if (cnt) cnt.textContent = _watchlistStocks.length ? `(${_watchlistStocks.length})` : '';
+  if (!_watchlistStocks.length) {
+    list.innerHTML = '<div class="wl-empty">No stocks — search above to add</div>';
+    return;
+  }
+  list.innerHTML = _watchlistStocks.map(s => {
+    const exp  = (s.expiry || '').substring(5);   // "2025-06-26" → "06-26"
+    const stk  = s.strike ? (+s.strike).toFixed(0) : '--';
+    const sel  = _selectedStocks.has(s.symbol);
+    return `<div class="wl-item${sel ? ' selected' : ''}" id="wl-${s.symbol}" data-symbol="${s.symbol}" data-score="0">
+      <button class="wl-sel${sel ? ' on' : ''}" onclick="toggleStockSelect('${s.symbol}')" title="${sel ? 'Click to deselect (will not trade)' : 'Click to select for trading'}">
+        ${sel ? '✓' : '○'}
+      </button>
+      <div class="wl-item-body" onclick="openStockDetail('${s.symbol}')" style="cursor:pointer">
+        <div class="wl-dir flat" id="wl-dir-${s.symbol}">—</div>
+        <div class="wl-item-info">
+          <div class="wl-item-row1">
+            <span class="wl-sym">${s.symbol}</span>
+            <span class="wl-chg flat" id="wl-chg-${s.symbol}">+0.00%</span>
+          </div>
+          <div class="wl-item-row2">
+            <span class="wl-spot" id="wl-spot-${s.symbol}">₹--</span>
+            <span class="wl-sep">·</span>
+            <span class="wl-strike-info">${stk} · ${exp}</span>
+          </div>
+          <div class="wl-item-row3">
+            <span class="wl-opt-price ce" id="wl-ce-${s.symbol}">${s.ce_symbol ? 'CE --' : ''}</span>
+            <span class="wl-opt-price pe" id="wl-pe-${s.symbol}">${s.pe_symbol ? 'PE --' : ''}</span>
+            <span class="wl-score" id="wl-score-${s.symbol}" title="Composite score: ATR · Momentum · Range · Week position · Premium">◆ --</span>
+            <span class="wl-pending" id="wl-pend-${s.symbol}" style="display:none"></span>
+          </div>
+          <div class="wl-item-row4">
+            <span class="wl-spike-thr" id="wl-spike-${s.symbol}" title="Spike threshold = 7-day avg daily range × 18%">⚡ --</span>
+          </div>
+        </div>
+      </div>
+      <button class="wl-del" onclick="removeWatchlistStock('${s.symbol}')" title="Remove">✕</button>
+    </div>`;
+  }).join('');
+  _updateWlSelCount();
+}
 
-  ceChk.className = tradeCE ? 'token-checkbox ce-checked' : 'token-checkbox';
-  peChk.className = tradePE ? 'token-checkbox pe-checked' : 'token-checkbox';
-  ceRow.className = 'token-row' + (tradeCE ? ' ce-active' : '');
-  peRow.className = 'token-row' + (tradePE ? ' pe-active' : '');
-  bothBadge.classList.toggle('show', tradeCE && tradePE);
+function toggleStockSelect(symbol) {
+  if (_selectedStocks.has(symbol)) {
+    _selectedStocks.delete(symbol);
+  } else {
+    _selectedStocks.add(symbol);
+  }
+  const item = document.getElementById('wl-' + symbol);
+  const btn  = item ? item.querySelector('.wl-sel') : null;
+  const sel  = _selectedStocks.has(symbol);
+  if (item) item.classList.toggle('selected', sel);
+  if (btn)  { btn.classList.toggle('on', sel); btn.textContent = sel ? '✓' : '○'; btn.title = sel ? 'Click to deselect (will not trade)' : 'Click to select for trading'; }
+  _updateWlSelCount();
+  _sortWatchlistByScore();
+}
 
-  topBar.innerHTML = '';
-  if (tradeCE && tradePE)      topBar.innerHTML = '<span class="side-pill both">CE + PE</span>';
-  else if (tradeCE)            topBar.innerHTML = '<span class="side-pill ce">CE</span>';
-  else if (tradePE)            topBar.innerHTML = '<span class="side-pill pe">PE</span>';
+function _updateWlSelCount() {
+  const cnt = document.getElementById('wlCount');
+  const total = _watchlistStocks.length;
+  const sel   = _selectedStocks.size;
+  if (cnt) cnt.textContent = total ? `(${sel}/${total})` : '';
+  // Update Select All button label
+  const btn = document.getElementById('wlSelectAllBtn');
+  if (btn && total > 0) btn.textContent = (sel === total) ? 'Unselect All' : 'Select All';
+}
+
+function toggleSelectAll() {
+  const total = _watchlistStocks.length;
+  if (!total) return;
+  const allSelected = _selectedStocks.size === total;
+  if (allSelected) {
+    // Unselect all
+    _watchlistStocks.forEach(s => {
+      _selectedStocks.delete(s.symbol);
+      const item = document.getElementById('wl-' + s.symbol);
+      const btn  = item ? item.querySelector('.wl-sel') : null;
+      if (item) item.classList.remove('selected');
+      if (btn)  { btn.classList.remove('on'); btn.textContent = '○'; btn.title = 'Click to select for trading'; }
+    });
+  } else {
+    // Select all
+    _watchlistStocks.forEach(s => {
+      _selectedStocks.add(s.symbol);
+      const item = document.getElementById('wl-' + s.symbol);
+      const btn  = item ? item.querySelector('.wl-sel') : null;
+      if (item) item.classList.add('selected');
+      if (btn)  { btn.classList.add('on'); btn.textContent = '✓'; btn.title = 'Click to deselect (will not trade)'; }
+    });
+  }
+  _updateWlSelCount();
+  _sortWatchlistByScore();
+}
+
+async function addWatchlistStock(symbol) {
+  const spin = document.getElementById('wlSpin');
+  const dd   = document.getElementById('wlDropdown');
+  const inp  = document.getElementById('wlSearchInput');
+  if (spin) spin.style.display = 'inline';
+  if (dd)  dd.innerHTML = `<div class="wl-dd-hint">Resolving ATM options for ${symbol}…</div>`;
+  try {
+    const resp = await fetch('/api/add_watchlist_stock', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ symbol }),
+    });
+    const data = await resp.json();
+    if (data.error) { alert('Error: ' + data.error); if (dd) dd.innerHTML = ''; return; }
+    if (dd)  dd.innerHTML = '';
+    if (inp) inp.value = '';
+    _selectedStocks.add(symbol.toUpperCase());   // auto-select on add
+    await loadWatchlist();
+  } catch(e) {
+    alert('Failed to add ' + symbol + ': ' + e.message);
+    if (dd) dd.innerHTML = '';
+  } finally {
+    if (spin) spin.style.display = 'none';
+  }
+}
+
+async function removeWatchlistStock(symbol) {
+  try {
+    await fetch('/api/remove_watchlist_stock/' + symbol, { method: 'DELETE' });
+    _selectedStocks.delete(symbol);
+    _watchlistStocks = _watchlistStocks.filter(s => s.symbol !== symbol);
+    renderWatchlist();
+  } catch(e) { alert('Failed to remove: ' + e.message); }
+}
+
+// Watchlist search input handler (set up after DOM ready)
+(function setupWatchlistSearch() {
+  const inp = document.getElementById('wlSearchInput');
+  const dd  = document.getElementById('wlDropdown');
+  if (!inp) return;
+  inp.addEventListener('input', () => {
+    clearTimeout(_wlSearchTimer);
+    const q = inp.value.trim();
+    if (!q) { dd.innerHTML = ''; return; }
+    dd.innerHTML = '<div class="wl-dd-hint">Searching…</div>';
+    _wlSearchTimer = setTimeout(() => _fetchFoStocks(q), 260);
+  });
+  inp.addEventListener('keydown', e => {
+    if (e.key === 'Escape') { dd.innerHTML = ''; inp.value = ''; }
+    if (e.key === 'Enter') {
+      const first = dd.querySelector('.wl-dd-row');
+      if (first) first.click();
+    }
+  });
+  document.addEventListener('click', e => {
+    if (!inp.contains(e.target) && !dd.contains(e.target)) dd.innerHTML = '';
+  });
+})();
+
+async function _fetchFoStocks(q) {
+  const dd = document.getElementById('wlDropdown');
+  try {
+    const data = await fetch('/api/search_fo_stocks?q=' + encodeURIComponent(q)).then(r => r.json());
+    if (data.error) { dd.innerHTML = `<div class="wl-dd-hint">${data.error}</div>`; return; }
+    if (!data.length) { dd.innerHTML = '<div class="wl-dd-hint">No F&amp;O stocks found</div>'; return; }
+    dd.innerHTML = data.map(s =>
+      `<div class="wl-dd-row" onclick="addWatchlistStock('${s.symbol}')">
+        <span class="wl-dd-sym">${s.symbol}</span>
+      </div>`
+    ).join('');
+  } catch(e) {
+    dd.innerHTML = `<div class="wl-dd-hint">Error: ${e.message}</div>`;
+  }
+}
+
+// ── Watchlist live data ───────────────────────────────────────
+function updateWatchlistLive(multiStocks) {
+  if (!multiStocks) return;
+  for (const [sym, d] of Object.entries(multiStocks)) {
+    const item = document.getElementById('wl-' + sym);
+    if (!item) continue;
+
+    // Prefer composite_score (multi-factor) for sorting; fall back to live tick score
+    const sortScore = d.composite_score != null && d.composite_score > 0
+                    ? d.composite_score : (d.score || 0);
+    item.dataset.score = sortScore;
+
+    // Direction badge
+    const dir = document.getElementById('wl-dir-' + sym);
+    if (dir) {
+      dir.className = 'wl-dir ' + (d.direction || 'flat');
+      dir.textContent = d.direction === 'bull' ? '▲' : d.direction === 'bear' ? '▼' : '—';
+    }
+    // Spot price
+    const spot = document.getElementById('wl-spot-' + sym);
+    if (spot && d.price != null) spot.textContent = '₹' + (+d.price).toFixed(1);
+    // % change
+    const chg = document.getElementById('wl-chg-' + sym);
+    if (chg && d.change_pct != null) {
+      const p = d.change_pct;
+      chg.textContent = (p >= 0 ? '+' : '') + p.toFixed(2) + '%';
+      chg.className = 'wl-chg ' + (p > 0.1 ? 'bull' : p < -0.1 ? 'bear' : 'flat');
+    }
+    // CE price
+    const ce = document.getElementById('wl-ce-' + sym);
+    if (ce) ce.textContent = d.ce_price != null ? 'CE ₹' + (+d.ce_price).toFixed(1) : (d.ce_symbol ? 'CE --' : '');
+    // PE price
+    const pe = document.getElementById('wl-pe-' + sym);
+    if (pe) pe.textContent = d.pe_price != null ? 'PE ₹' + (+d.pe_price).toFixed(1) : (d.pe_symbol ? 'PE --' : '');
+    // Composite score badge + AI strategy state
+    const scoreEl = document.getElementById('wl-score-' + sym);
+    if (scoreEl) {
+      const cs  = d.composite_score || 0;
+      const ai  = d.ai_strategy || {};
+      const p   = ai.last_params || {};
+      if (cs > 0) {
+        scoreEl.textContent = '◆ ' + cs.toFixed(0);
+        scoreEl.className   = 'wl-score ' + (cs >= 70 ? 'hot' : cs >= 45 ? 'warm' : 'cool');
+        // Rich tooltip: score breakdown + AI params
+        const bd  = d.score_breakdown || {};
+        const lines = [
+          `Score ${cs.toFixed(0)}/100`,
+          d.hist_atr ? `7d ATR: ${(+d.hist_atr).toFixed(1)}pts  →  Spike threshold: ${(+d.hist_threshold).toFixed(1)}pts` : `Spike threshold: ${(+d.jump_threshold).toFixed(1)}pts (live ATR)`,
+          bd.atr      ? `ATR:${bd.atr}  Mom:${bd.mom_3d}  Rng:${bd.intraday}` : '',
+          bd.week_pos ? `Wk:${bd.week_pos}  Tr30:${bd.trend_30}  Prem:${bd.premium}` : '',
+          ai.n_trades != null
+            ? `AI: ${ai.n_trades} trades  WR:${(ai.win_rate*100).toFixed(0)}%  ${ai.model_ready?'✓ ready':'warming'}`
+            : '',
+          p.sl_pct_p1 ? `SL:${p.sl_pct_p1}%→${p.sl_pct_p2}%  trail:${p.trail_pct}%  t/o:${p.timeout_secs}s` : '',
+          p.side_bias ? `Bias: ${p.side_bias}` : '',
+        ].filter(Boolean).join('\n');
+        scoreEl.title = lines;
+      }
+    }
+
+    // Pending spike indicator
+    const pend = document.getElementById('wl-pend-' + sym);
+    if (pend) {
+      if (d.pending_side) {
+        pend.textContent = '⚡ ' + d.pending_side;
+        pend.style.display = '';
+      } else {
+        pend.style.display = 'none';
+      }
+    }
+
+    // Spike threshold badge — shows per-stock historical ATR-based threshold
+    const spikeEl = document.getElementById('wl-spike-' + sym);
+    if (spikeEl) {
+      if (d.hist_threshold != null && d.hist_atr != null) {
+        spikeEl.textContent = `⚡ ${(+d.hist_threshold).toFixed(1)}pts`;
+        spikeEl.title = `7-day ATR: ${(+d.hist_atr).toFixed(1)}pts  →  Spike threshold: ${(+d.hist_threshold).toFixed(1)}pts  (7d avg range × 18%)`;
+        spikeEl.className = 'wl-spike-thr ready';
+      } else {
+        const live = d.jump_threshold || d.threshold;
+        spikeEl.textContent = live ? `⚡ ${(+live).toFixed(1)}pts` : '⚡ --';
+        spikeEl.title = live ? `Live ATR threshold: ${(+live).toFixed(1)}pts (historical ATR loading…)` : 'Calculating…';
+        spikeEl.className = 'wl-spike-thr loading';
+      }
+    }
+  }
+  // Only re-sort every 30 seconds to prevent constant position swapping
+  const now = Date.now();
+  if ((now - _lastSortTs) >= 30000) {
+    _lastSortTs = now;
+    _sortWatchlistByScore();
+  }
+}
+
+let _lastSortTs = 0;
+
+function _sortWatchlistByScore() {
+  const list = document.getElementById('wlList');
+  if (!list) return;
+  const items = Array.from(list.querySelectorAll('.wl-item'));
+  items.sort((a, b) => {
+    // Selected stocks always on top; within group sort by score descending
+    const aSel = a.classList.contains('selected') ? 1 : 0;
+    const bSel = b.classList.contains('selected') ? 1 : 0;
+    if (bSel !== aSel) return bSel - aSel;
+    return parseFloat(b.dataset.score || 0) - parseFloat(a.dataset.score || 0);
+  });
+  items.forEach(el => list.appendChild(el));
 }
 
 function syncServerSides(sides) {
@@ -99,6 +372,13 @@ function applyMode(mode) {
   pill.className = 'mode-pill-top ' + mode;
   pill.textContent = isReal ? '🔴 REAL' : '🔵 DEMO';
   document.getElementById('orderIdRow').classList.toggle('show', isReal);
+  if (isReal) {
+    fetchRealBalance();
+  } else {
+    // Restore demo capital from last known state
+    const capEl = document.getElementById('capVal');
+    if (capEl && _lastCapital) capEl.textContent = '₹' + _lastCapital.toLocaleString('en-IN', { maximumFractionDigits: 0 });
+  }
 }
 
 function setMode(mode) {
@@ -109,21 +389,107 @@ function setMode(mode) {
   socket.emit('set_trading_mode', { mode });
 }
 
+async function fetchRealBalance() {
+  const capEl = document.getElementById('capVal');
+  if (capEl) capEl.textContent = '₹…';
+  try {
+    const data = await fetch('/api/account_balance').then(r => r.json());
+    if (data.error) { if (capEl) capEl.textContent = 'ERR'; return; }
+    if (capEl) capEl.textContent = '₹' + (+data.available).toLocaleString('en-IN', { maximumFractionDigits: 0 });
+  } catch(e) {
+    if (capEl) capEl.textContent = '₹--';
+  }
+}
+
+
 // ── Chart ─────────────────────────────────────────────────────
 function setChart(mode) {
   chartMode = mode;
   document.getElementById('ctN').classList.toggle('active', mode === 'nifty');
   document.getElementById('ctO').classList.toggle('active', mode === 'option');
-  document.getElementById('chartTitle').textContent = mode === 'nifty' ? 'NIFTY 50' : 'Option Price';
+  document.getElementById('ctSS') && document.getElementById('ctSS').classList.toggle('active', mode === 'stock_spot');
+  document.getElementById('ctSC') && document.getElementById('ctSC').classList.toggle('active', mode === 'stock_ce');
+  document.getElementById('ctSP') && document.getElementById('ctSP').classList.toggle('active', mode === 'stock_pe');
+  const sym = _activeStockSym;
+  if (mode === 'nifty')      document.getElementById('chartTitle').textContent = 'NIFTY 50';
+  else if (mode === 'option')document.getElementById('chartTitle').textContent = 'Option Price';
+  else if (mode === 'stock_spot' && sym) document.getElementById('chartTitle').textContent = sym + ' · SPOT';
+  else if (mode === 'stock_ce'   && sym) document.getElementById('chartTitle').textContent = sym + ' · CE Premium';
+  else if (mode === 'stock_pe'   && sym) document.getElementById('chartTitle').textContent = sym + ' · PE Premium';
   rebuildAndDraw();
 }
+// Map TF (seconds) → Zerodha interval string for historical API
+function _tfToZerodhaInterval(tf) {
+  if (tf <= 60)   return 'minute';
+  if (tf <= 180)  return '3minute';
+  if (tf <= 300)  return '5minute';
+  if (tf <= 900)  return '15minute';
+  if (tf <= 1800) return '30minute';
+  return '60minute';
+}
+
 function setTF(tf, id) {
   TF = tf;
   document.querySelectorAll('.tf-btn').forEach(b => b.classList.remove('active'));
   document.getElementById(id).classList.add('active');
-  rebuildAndDraw();
+  // If a stock chart is open, reload historical candles at the right interval
+  if (_activeStockSym) {
+    _reloadStockHistorical(_activeStockSym);
+  } else {
+    rebuildAndDraw();
+  }
+}
+
+async function _reloadStockHistorical(symbol) {
+  const interval = _tfToZerodhaInterval(TF);
+  try {
+    const data = await fetch(
+      '/api/stock_detail/' + encodeURIComponent(symbol) + '?interval=' + interval
+    ).then(r => r.json());
+    stockSpotCandles = data.spot_candles || [];
+    stockCeCandles   = data.ce_candles   || [];
+    stockPeCandles   = data.pe_candles   || [];
+    rebuildAndDraw();
+  } catch(e) {
+    console.error('Historical reload failed:', e);
+    rebuildAndDraw();
+  }
 }
 function buildCandles() {
+  if (chartMode.startsWith('stock_')) {
+    // Pre-built OHLC from Zerodha historical API (minute candles)
+    const pre  = chartMode === 'stock_spot' ? stockSpotCandles
+               : chartMode === 'stock_ce'   ? stockCeCandles
+               : stockPeCandles;
+    // Live ticks accumulated since page load (from WebSocket state events)
+    const live = chartMode === 'stock_spot' ? stockSpotHist
+               : chartMode === 'stock_ce'   ? stockCeHist
+               : stockPeHist;
+
+    if (!pre.length && !live.length) { candles = []; return; }
+
+    // Start with historical candles as immutable base
+    candles = pre.map(c => ({ t: c.t, o: c.o, h: c.h, l: c.l, c: c.c }));
+
+    // Bucket live ticks using current TF, append after historical data
+    if (live.length) {
+      const lastPreT = candles.length ? candles[candles.length - 1].t : 0;
+      const liveMap  = new Map();
+      for (const { t, v } of live) {
+        const k = Math.floor(t / TF) * TF;
+        if (!liveMap.has(k)) liveMap.set(k, []);
+        liveMap.get(k).push(v);
+      }
+      for (const [t, arr] of [...liveMap.entries()].sort((a, b) => a[0] - b[0])) {
+        if (t > lastPreT) {
+          candles.push({ t, o: arr[0], h: Math.max(...arr), l: Math.min(...arr), c: arr[arr.length - 1] });
+        }
+      }
+    }
+    return;
+  }
+
+  // Nifty / Option — original tick-based logic
   const hist = chartMode === 'nifty' ? niftyHist : optHist;
   if (!hist.length) { candles = []; return; }
   const b = new Map();
@@ -171,16 +537,18 @@ function priceRange(s, e) {
   let mn = Infinity, mx = -Infinity;
   for (const c of sl) { mn = Math.min(mn, c.l); mx = Math.max(mx, c.h); }
   const rawRange = mx - mn || 1, thr = rawRange * 2;
-  const levels = chartMode === 'nifty' ? [lvl.ref] : [lvl.entry, lvl.sl, lvl.trail];
+  const isStock = chartMode.startsWith('stock_');
+  const levels = chartMode === 'nifty' ? [lvl.ref] : isStock ? [] : [lvl.entry, lvl.sl, lvl.trail];
   for (const v of levels) {
     if (v > 0 && Math.abs(v - (mn+mx)/2) < thr) { mn = Math.min(mn, v); mx = Math.max(mx, v); }
   }
   const pad = Math.max((mx - mn) * 0.08, 2);
   return { mn: mn - pad, mx: mx + pad };
 }
-function py(p, mn, mx) { return (cv.height - AX_H) * (1 - (p - mn) / (mx - mn)); }
+function getMainH() { return Math.max(80, cv.height - AX_H); }
+function py(p, mn, mx) { return _mainH * (1 - (p - mn) / (mx - mn)); }
 function drawGrid(mn, mx) {
-  const h = cv.height - AX_H, w = cv.width - AX_W;
+  const h = _mainH, w = cv.width - AX_W;
   const range = mx - mn || 1, raw = range / 6;
   const mag  = Math.pow(10, Math.floor(Math.log10(raw)));
   const nice = Math.ceil(raw / mag) * mag;
@@ -189,6 +557,7 @@ function drawGrid(mn, mx) {
   for (let v = sv; v <= mx + nice; v += nice) {
     if (v < mn) continue;
     const y = py(v, mn, mx);
+    if (y < 0 || y > h) continue;
     ctx.strokeStyle = 'rgba(28,36,56,.9)'; ctx.lineWidth = 1;
     ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
     ctx.fillStyle = 'rgba(78,101,133,.5)'; ctx.fillText(v.toFixed(1), cv.width - 3, y + 3);
@@ -204,7 +573,7 @@ function drawGrid(mn, mx) {
     ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke();
     const d = new Date(candles[i].t * 1000);
     ctx.fillStyle = 'rgba(78,101,133,.38)';
-    ctx.fillText(d.toLocaleTimeString('en', { hour:'2-digit', minute:'2-digit', hour12:false }), x, cv.height - 4);
+    ctx.fillText(d.toLocaleTimeString('en', { hour:'2-digit', minute:'2-digit', hour12:false }), x, _mainH + AX_H - 4);
   }
 }
 function drawCandle(c, x, mn, mx, isLast) {
@@ -225,7 +594,7 @@ function drawCandle(c, x, mn, mx, isLast) {
 function drawLevel(price, color, dash, mn, mx) {
   if (!price || price <= 0) return;
   const y = py(price, mn, mx), w = cv.width - AX_W;
-  if (y < 0 || y > cv.height - AX_H) return;
+  if (y < 0 || y > _mainH) return;
   ctx.save();
   ctx.strokeStyle = color; ctx.lineWidth = 1.5;
   ctx.setLineDash(dash); ctx.globalAlpha = 0.75;
@@ -260,8 +629,8 @@ function drawMarkers(start, mn, mx) {
 }
 function drawCross(mn, mx) {
   if (mX < 0) return;
-  const w = cv.width - AX_W, h = cv.height - AX_H;
-  if (mX > w) return;
+  const w = cv.width - AX_W, h = _mainH;
+  if (mX > w || mY > h) return;
   ctx.save();
   ctx.strokeStyle = 'rgba(78,101,133,.3)'; ctx.lineWidth = 1; ctx.setLineDash([4,4]);
   ctx.beginPath();
@@ -295,8 +664,11 @@ function drawCross(mn, mx) {
 function updateTags(mn, mx) {
   const niftyLvls  = [{ id:'tagRef',   price:lvl.ref   }];
   const optionLvls = [{ id:'tagEntry', price:lvl.entry }, { id:'tagSL', price:lvl.sl }, { id:'tagTrail', price:lvl.trail }];
-  const active = chartMode === 'nifty' ? niftyLvls  : optionLvls;
-  const hidden = chartMode === 'nifty' ? optionLvls : niftyLvls;
+  const active = (chartMode === 'nifty' && !chartMode.startsWith('stock_')) ? niftyLvls
+               : chartMode.startsWith('stock_') ? []
+               : optionLvls;
+  const hidden = chartMode.startsWith('stock_') ? [...niftyLvls, ...optionLvls]
+               : chartMode === 'nifty' ? optionLvls : niftyLvls;
   hidden.forEach(({ id }) => { document.getElementById(id).style.display = 'none'; });
   active.forEach(({ id, price }) => {
     const el = document.getElementById(id);
@@ -311,27 +683,100 @@ function updateTags(mn, mx) {
 function drawEmpty() {
   ctx.fillStyle = '#050810'; ctx.fillRect(0, 0, cv.width, cv.height);
   ctx.fillStyle = 'rgba(78,101,133,.15)'; ctx.font = '12px Space Grotesk'; ctx.textAlign = 'center';
-  ctx.fillText('Check CE and/or PE boxes, enter tokens, then start', cv.width/2, cv.height/2-8);
+  ctx.fillText('Add stocks to watchlist and click Start Buy Robot', cv.width/2, cv.height/2-8);
   ctx.fillStyle = 'rgba(78,101,133,.08)'; ctx.font = '10px IBM Plex Mono';
   ctx.fillText('Scroll zoom · Drag pan · Toggle Nifty/Option', cv.width/2, cv.height/2+14);
 }
+// ── Heikin-Ashi transform ─────────────────────────────────────
+function toHeikinAshi(src) {
+  const ha = [];
+  for (let i = 0; i < src.length; i++) {
+    const c = src[i];
+    const haC = (c.o + c.h + c.l + c.c) / 4;
+    const haO = i === 0 ? (c.o + c.c) / 2 : (ha[i-1].o + ha[i-1].c) / 2;
+    ha.push({ t: c.t, o: haO, h: Math.max(c.h, haO, haC), l: Math.min(c.l, haO, haC), c: haC });
+  }
+  return ha;
+}
+
+// ── Chart type helpers ────────────────────────────────────────
+function setChartType(type) {
+  chartType = type;
+  ['ctypeCandle','ctypeHA','ctypeLine','ctypeArea'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.classList.remove('active');
+  });
+  const map = { candle:'ctypeCandle', ha:'ctypeHA', line:'ctypeLine', area:'ctypeArea' };
+  const el = document.getElementById(map[type]);
+  if (el) el.classList.add('active');
+  draw();
+}
+
+function _drawLineChart(src, start, end, cw, mn, mx) {
+  ctx.save(); ctx.strokeStyle = UP; ctx.lineWidth = 1.5; ctx.setLineDash([]);
+  ctx.beginPath(); let s = false;
+  for (let i = start; i < end; i++) {
+    const x = (i-start)*cw + candleW/2, y = py(src[i].c, mn, mx);
+    if (!s) { ctx.moveTo(x,y); s=true; } else ctx.lineTo(x,y);
+  }
+  ctx.stroke(); ctx.restore();
+}
+function _drawAreaChart(src, start, end, cw, mn, mx) {
+  const baseY = _mainH;
+  ctx.save();
+  const grad = ctx.createLinearGradient(0, 0, 0, baseY);
+  grad.addColorStop(0, 'rgba(0,232,122,0.28)'); grad.addColorStop(1, 'rgba(0,232,122,0.0)');
+  ctx.beginPath();
+  const sx = start*cw + candleW/2 - start*cw;
+  ctx.moveTo(0, baseY);
+  for (let i = start; i < end; i++) {
+    const x = (i-start)*cw + candleW/2, y = py(src[i].c, mn, mx);
+    if (i === start) { ctx.lineTo(x, baseY); ctx.lineTo(x, y); }
+    else ctx.lineTo(x, y);
+  }
+  ctx.lineTo((end-1-start)*cw + candleW/2, baseY);
+  ctx.closePath();
+  ctx.fillStyle = grad; ctx.fill();
+  ctx.beginPath();
+  for (let i = start; i < end; i++) {
+    const x = (i-start)*cw + candleW/2, y = py(src[i].c, mn, mx);
+    if (i === start) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+  }
+  ctx.strokeStyle = UP; ctx.lineWidth = 1.5; ctx.setLineDash([]); ctx.stroke();
+  ctx.restore();
+}
+// ── Main draw ─────────────────────────────────────────────────
 function draw() {
   if (!cv.width || !cv.height) return;
+  _mainH = getMainH();
   ctx.clearRect(0, 0, cv.width, cv.height);
   ctx.fillStyle = '#050810'; ctx.fillRect(0, 0, cv.width, cv.height);
   if (!candles.length) { drawEmpty(); return; }
+
+  const dispCandles = chartType === 'ha' ? toHeikinAshi(candles) : candles;
   const { start, end } = view();
   const { mn, mx }     = priceRange(start, end);
   drawGrid(mn, mx);
-  if (chartMode === 'nifty') {
-    drawLevel(lvl.ref,   'rgba(176,106,255,.8)', [8,4], mn, mx);
+
+  if (chartMode.startsWith('stock_')) {
+    // no level overlays
+  } else if (chartMode === 'nifty') {
+    drawLevel(lvl.ref, 'rgba(176,106,255,.8)', [8,4], mn, mx);
   } else {
     drawLevel(lvl.entry, 'rgba(0,212,255,.85)',  [8,4], mn, mx);
     drawLevel(lvl.sl,    'rgba(255,61,92,.85)',  [4,4], mn, mx);
     drawLevel(lvl.trail, 'rgba(255,176,32,.85)', [6,3], mn, mx);
   }
+
   const cw = candleW + 2;
-  for (let i = start; i < end; i++) drawCandle(candles[i], (i-start)*cw, mn, mx, i===candles.length-1);
+  if (chartType === 'line') {
+    _drawLineChart(dispCandles, start, end, cw, mn, mx);
+  } else if (chartType === 'area') {
+    _drawAreaChart(dispCandles, start, end, cw, mn, mx);
+  } else {
+    for (let i = start; i < end; i++) drawCandle(dispCandles[i], (i-start)*cw, mn, mx, i===candles.length-1);
+  }
+
   drawMarkers(start, mn, mx);
   if (lastP) {
     const y = py(lastP, mn, mx), w = cv.width - AX_W;
@@ -340,6 +785,7 @@ function draw() {
     ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
     ctx.restore();
   }
+  drawUserDrawings(mn, mx);
   drawCross(mn, mx);
   updateTags(mn, mx);
 }
@@ -352,7 +798,10 @@ cv.addEventListener('mousemove', e => {
   mX = (e.clientX-r.left)*sx; mY = (e.clientY-r.top)*sy; draw();
 });
 cv.addEventListener('mouseleave', () => { mX=-1; mY=-1; drag=false; document.getElementById('xTip').style.display='none'; draw(); });
-cv.addEventListener('mousedown', e => { drag=true; dX=e.clientX; dOff=viewOff; cv.style.cursor='grabbing'; });
+cv.addEventListener('mousedown', e => {
+  if (activeTool !== 'cursor') { handleDrawClick(e); return; }
+  drag=true; dX=e.clientX; dOff=viewOff; cv.style.cursor='grabbing';
+});
 cv.addEventListener('mouseup',   () => { drag=false; cv.style.cursor='crosshair'; });
 cv.addEventListener('wheel', e => {
   e.preventDefault();
@@ -400,22 +849,19 @@ socket.on('state', d => {
   isRunning = d.running; updateBtn();
   if (d.trading_mode != null) applyMode(d.trading_mode);
   if (d.active_sides) syncServerSides(d.active_sides);
+  if (d.index_name) {
+    const lbl = document.getElementById('tkNLabel');
+    if (lbl) lbl.textContent = d.index_name;
+  }
 
-  // CE / PE live prices
-  if (d.ce_price != null) {
-    set('tkCE', '₹' + (+d.ce_price).toFixed(2));
-    const el = document.getElementById('ceLive');
-    el.textContent = '₹' + (+d.ce_price).toFixed(2);
-    el.classList.add('has-price');
-  }
-  if (d.pe_price != null) {
-    set('tkPE', '₹' + (+d.pe_price).toFixed(2));
-    const el = document.getElementById('peLive');
-    el.textContent = '₹' + (+d.pe_price).toFixed(2);
-    el.classList.add('has-price');
-  }
-  if (d.ce_strike) set('ceStrike', d.ce_strike);
-  if (d.pe_strike) set('peStrike', d.pe_strike);
+  // CE / PE live prices (topbar only)
+  if (d.ce_price != null) set('tkCE', '₹' + (+d.ce_price).toFixed(2));
+  if (d.pe_price != null) set('tkPE', '₹' + (+d.pe_price).toFixed(2));
+
+  // Live watchlist momentum update
+  if (d.multi_stocks) updateWatchlistLive(d.multi_stocks);
+  // Live-update stock detail modal if open
+  if (d.multi_stocks) _sdLiveUpdate(d.multi_stocks);
 
   // Order IDs
   if (d.last_order_id) {
@@ -518,6 +964,7 @@ socket.on('state', d => {
       fill.style.width = (sc * 100) + '%';
       fill.style.background = sc >= 0.72 ? 'var(--green)' : sc >= 0.57 ? 'var(--cyan)' : sc >= 0.42 ? 'var(--amber)' : 'var(--red)';
     }
+    updateAiRing(sc);
     const tkAi = document.getElementById('tkAiScore');
     if (tkAi) tkAi.style.color = sc >= 0.72 ? 'var(--green)' : sc >= 0.57 ? 'var(--cyan)' : sc >= 0.42 ? 'var(--amber)' : 'var(--red)';
   }
@@ -535,6 +982,45 @@ socket.on('state', d => {
         readyEl.innerHTML = `<span class="ai-ready-dot off"></span> ${rem} more trades`;
         readyEl.className = 'ai-v y';
       }
+    }
+  }
+
+  if (d.adv_vol_atr != null) {
+    const atr = (+d.adv_vol_atr).toFixed(2);
+    const mult = d.adv_vol_mult || 1.0;
+    const revRate = d.adv_vol_rev_rate != null ? (+d.adv_vol_rev_rate * 100).toFixed(0) + '%' : '--';
+    set('tkVolAtr', atr + 'p');
+    document.getElementById('tkVolAtr').style.color =
+      mult >= 1.2 ? 'var(--green)' : mult <= 0.8 ? 'var(--amber)' : 'var(--cyan)';
+    const gateEl = document.getElementById('fvVolGate');
+    if (gateEl) {
+      if (!d.adv_vol_gate_enabled) {
+        gateEl.textContent = 'OFF'; gateEl.className = 'fval fv-off';
+      } else if (mult >= 1.2) {
+        gateEl.textContent = 'LOW-VOL ✓'; gateEl.className = 'fval fv-boost';
+      } else if (mult <= 0.0) {
+        gateEl.textContent = 'CHOPPY ✗'; gateEl.className = 'fval fv-block';
+      } else if (mult <= 0.8) {
+        gateEl.textContent = 'HIGH-VOL'; gateEl.className = 'fval fv-warn';
+      } else {
+        gateEl.textContent = 'NORMAL'; gateEl.className = 'fval fv-ok';
+      }
+    }
+    set('fvVolAtr', atr + ' pts');
+    set('fvChopRate', revRate);
+    document.getElementById('fvChopRate').className =
+      'fval ' + (+d.adv_vol_rev_rate >= 0.65 ? 'fv-block' : +d.adv_vol_rev_rate >= 0.45 ? 'fv-warn' : 'fv-ok');
+  }
+  if (d.adv_breakout_range != null) {
+    const br = d.adv_breakout_range;
+    const boEl = document.getElementById('fvBreakout');
+    if (boEl) {
+      if (!d.adv_breakout_enabled) { boEl.textContent = 'OFF'; boEl.className = 'fval fv-off'; }
+      else { boEl.textContent = 'ON'; boEl.className = 'fval fv-ok'; }
+    }
+    const brEl = document.getElementById('fvBreakoutRange');
+    if (brEl && br.rng_low != null) {
+      brEl.textContent = br.rng_low.toFixed(1) + '–' + br.rng_high.toFixed(1) + ' (' + br.rng_width.toFixed(1) + 'p)';
     }
   }
 
@@ -659,7 +1145,10 @@ socket.on('state', d => {
   set('stTrades', d.trades_today || 0);
   const wr = d.trades_today ? Math.round(d.wins/d.trades_today*100)+'%' : '--';
   set('stWin', wr);
-  if (d.capital) set('capVal', '₹' + d.capital.toLocaleString('en-IN'));
+  if (d.capital) {
+    _lastCapital = d.capital;
+    if (currentMode !== 'real') set('capVal', '₹' + d.capital.toLocaleString('en-IN'));
+  }
 
   document.getElementById('exitBtn').classList.toggle('show', !!d.trade_open);
   updateTradeCard(d);
@@ -725,6 +1214,12 @@ socket.on('trade_closed', d => {
   document.getElementById('tcProfitTrailRow').classList.remove('show');
   document.getElementById('tcRatchetRow').classList.remove('show');
   ['tcBreakevenRow','tcMoveTypeRow','tcMomentumRow'].forEach(id => { const el=document.getElementById(id); if(el) el.style.display='none'; });
+  const timerRow = document.getElementById('tcTimerRow');
+  if (timerRow) timerRow.style.display = 'none';
+  const fill = document.getElementById('tcTimerFill');
+  if (fill) fill.style.width = '0%';
+  const hero = document.getElementById('livePnlHero');
+  if (hero) { hero.textContent = '--'; hero.className = 'live-pnl-hero'; }
   draw();
 });
 
@@ -781,7 +1276,7 @@ function updateSpikeMeter(move, tradeLocked, hasData, pendingSide, confirmCount,
     badge.textContent='FLAT'; badge.className='spk-badge neu'; valEl.className='spike-val neu';
   }
   valEl.textContent=(move>=0?'+':'')+move.toFixed(2)+' pts';
-  if (Math.abs(pct)>=1&&!wrongDir) subEl.textContent='🚀 Spike! Running filters…';
+  if (Math.abs(pct)>=1&&!wrongDir) { subEl.textContent='🚀 Spike! Running filters…'; flashSpikeGauge(); }
   else if (wrongDir)               subEl.textContent=`${side} not selected — ignored`;
   else { const rem=(jumpPts-Math.abs(move)).toFixed(2); subEl.textContent=rem+' pts to trigger'; }
 }
@@ -831,6 +1326,10 @@ function updateTradeCard(d) {
       .forEach(id => { const el=document.getElementById(id); if(el) el.style.display='none'; });
     profitTrailRow.classList.remove('show');
     ratchetRow.classList.remove('show');
+    const heroEl = document.getElementById('livePnlHero');
+    if (heroEl) { heroEl.textContent = '--'; heroEl.className = 'live-pnl-hero'; }
+    const timerRowEl = document.getElementById('tcTimerRow');
+    if (timerRowEl) timerRowEl.style.display = 'none';
     return;
   }
   const s = d.active_side;
@@ -861,12 +1360,20 @@ function updateTradeCard(d) {
     const h = d.held_secs, hEl = document.getElementById('tcHeld');
     hEl.textContent = h + 's';
     hEl.className   = 'lv ' + (h > 45 ? 'y' : 'c');
+    const timerRow = document.getElementById('tcTimerRow');
+    if (timerRow) timerRow.style.display = 'flex';
+    updateTradeTimer(h);
   }
   if (d.opt_price != null) set('tcCurrent', '₹' + d.opt_price.toFixed(2));
   if (d.live_pnl  != null) {
     const v = d.live_pnl, el = document.getElementById('tcLivePL');
     el.textContent = (v>=0?'+':'')+'₹'+v.toFixed(2);
     el.className   = 'lv '+(v>=0?'g':'r');
+    const hero = document.getElementById('livePnlHero');
+    if (hero) {
+      hero.textContent = (v>=0?'+':'')+'₹'+v.toFixed(2);
+      hero.className = 'live-pnl-hero ' + (v>=0?'profit':'loss');
+    }
   }
 
   if (d.phase2) {
@@ -937,25 +1444,57 @@ function updateTradeCard(d) {
   }
 }
 
+// ── Advanced UI helpers ───────────────────────────────────────
+function updateAiRing(score) {
+  const el = document.getElementById('aiRingProg');
+  if (!el) return;
+  const circumference = 163.4;
+  el.style.strokeDashoffset = circumference * (1 - Math.max(0, Math.min(1, score)));
+  el.style.stroke = score >= 0.72 ? 'var(--green)' : score >= 0.57 ? 'var(--cyan)' : score >= 0.42 ? 'var(--amber)' : 'var(--red)';
+}
+
+function updateTradeTimer(heldSecs) {
+  const fill = document.getElementById('tcTimerFill');
+  if (!fill) return;
+  const pct = Math.min(100, (heldSecs / 300) * 100);
+  fill.style.width = pct + '%';
+  fill.style.background = pct >= 80 ? 'var(--red)' : pct >= 50 ? 'var(--amber)' : 'var(--cyan)';
+}
+
+let _flashTimer = null;
+function flashSpikeGauge() {
+  const gauge = document.querySelector('.spike-gauge');
+  if (!gauge) return;
+  gauge.classList.add('spiking');
+  clearTimeout(_flashTimer);
+  _flashTimer = setTimeout(() => gauge.classList.remove('spiking'), 800);
+}
+
+function toggleFilters() {
+  const sec = document.getElementById('filterSec');
+  const chev = document.getElementById('filterChevron');
+  if (!sec) return;
+  sec.classList.toggle('open');
+  if (chev) chev.style.transform = sec.classList.contains('open') ? 'rotate(180deg)' : '';
+}
+
 // ── Controls ──────────────────────────────────────────────────
 function toggleRobot() {
   if (isRunning) {
     socket.emit('stop_robot');
     isRunning = false; updateBtn();
   } else {
-    if (!tradeCE && !tradePE) { alert('Check at least one side (CE or PE) to trade'); return; }
-    const ceVal = document.getElementById('ceInput').value.trim();
-    const peVal = document.getElementById('peInput').value.trim();
-    if (tradeCE && !ceVal) { alert('CE is checked — please enter CE Symbol/Token'); return; }
-    if (tradePE && !peVal) { alert('PE is checked — please enter PE Symbol/Token'); return; }
-
-    const sideStr = (tradeCE && tradePE) ? 'CE + PE (BOTH)' : tradeCE ? 'CE only' : 'PE only';
+    if (!_watchlistStocks.length) {
+      alert('Add at least one stock to the watchlist before starting'); return;
+    }
+    const activeSyms = [..._selectedStocks].filter(s => _watchlistStocks.some(w => w.symbol === s));
+    if (!activeSyms.length) {
+      alert('Tick at least one stock (✓) to enable trading'); return;
+    }
     if (currentMode === 'real') {
       const ok = confirm(
-        `🔴 Starting in REAL TRADING mode!\n\nSides: ${sideStr}\n` +
-        (tradeCE ? `CE: ${ceVal}\n` : '') +
-        (tradePE ? `PE: ${peVal}\n` : '') +
-        '\nLive BUY/SELL orders will be sent to Zerodha.\n\nConfirm to proceed.'
+        `🔴 Starting in REAL TRADING mode!\n\nActive stocks: ${activeSyms.join(', ')}\n\n` +
+        'Live BUY/SELL orders will be sent to Zerodha.\n\nConfirm to proceed.'
       );
       if (!ok) return;
     }
@@ -967,9 +1506,6 @@ function toggleRobot() {
     niftyHist=[]; optHist=[]; candles=[];
     lastSkipReason=null;
     set('oidBuy','—'); set('oidSell','—');
-    set('ceLive','--'); set('peLive','--');
-    document.getElementById('ceLive').classList.remove('has-price');
-    document.getElementById('peLive').classList.remove('has-price');
     ['tcEntry','tcCurrent','tcSL','tcTrail','tcPeak','tcPeakPct','tcPeakP','tcQty','tcHeld','tcLivePL','tcAtrTrail','tcMinTrail']
       .forEach(id => set(id,'--'));
     ['tcTrailRow','tcPeakRow','tcPeakPctRow','tcProfRow','tcAtrRow']
@@ -980,6 +1516,7 @@ function toggleRobot() {
     set('aiScoreVal','--'); set('aiBrainTrades','0'); set('aiBrainWR','--');
     const aiScoreFill = document.getElementById('aiScoreFill');
     if (aiScoreFill) aiScoreFill.style.width = '0%';
+    updateAiRing(0);
     const mFill = document.getElementById('momentumFill');
     if (mFill) mFill.style.width = '0%';
     document.getElementById('exitBtn').classList.remove('show');
@@ -991,13 +1528,9 @@ function toggleRobot() {
     set('tkTrailPct','--'); set('trailLiveVal','--');
     set('tkConfirm','--'); set('tkJumpThr','--');
     set('tkCE','--'); set('tkPE','--');
+    set('tkVolAtr','--');
 
-    socket.emit('start_robot', {
-      ce_input: ceVal,
-      pe_input: peVal,
-      trade_ce: tradeCE,
-      trade_pe: tradePE,
-    });
+    socket.emit('start_robot', { symbols: activeSyms });
     isRunning = true; updateBtn();
   }
 }
@@ -1010,11 +1543,11 @@ function manualExit() {
 
 function updateBtn() {
   const b = document.getElementById('toggleBtn');
+  if (!b) return;
   if (isRunning) {
     b.className = 'btn btn-stop'; b.textContent = '⏹ Stop Robot';
   } else {
     b.className = 'btn btn-go'; b.textContent = '🎯 Start Buy Robot';
-    renderSideUI();
   }
 }
 
@@ -1028,6 +1561,500 @@ function appendLog(e) {
 }
 function clearLogs() { document.getElementById('logBody').innerHTML = ''; }
 
+// ── Drawing Tools ─────────────────────────────────────────────
+let activeTool = 'cursor';
+let drawings   = [];   // {type:'hline', price} | {type:'tline', idx1,p1,idx2,p2} | {type:'rect', idx1,p1,idx2,p2}
+let drawState  = null; // in-progress drawing
+
+function setDrawTool(tool) {
+  activeTool = tool;
+  document.querySelectorAll('.dt-btn').forEach(b => b.classList.remove('active'));
+  const idMap = { cursor:'dtCursor', hline:'dtHline', tline:'dtTline', rect:'dtRect', vline:'dtVline' };
+  const el = document.getElementById(idMap[tool]);
+  if (el) el.classList.add('active');
+  drawState = null;
+  cv.style.cursor = tool === 'cursor' ? 'crosshair' : 'cell';
+}
+
+function clearDrawings() { drawings = []; drawState = null; draw(); }
+
+function _canvasToData(e) {
+  const r   = cv.getBoundingClientRect();
+  const sx  = cv.width  / r.width;
+  const sy  = cv.height / r.height;
+  const x   = (e.clientX - r.left) * sx;
+  const y   = (e.clientY - r.top)  * sy;
+  const { start } = view();
+  const { mn, mx } = priceRange(start, start + Math.floor((cv.width - AX_W) / (candleW + 2)));
+  const h     = _mainH;
+  const price = mn + (1 - Math.max(0, Math.min(h, y)) / h) * (mx - mn);
+  const idx   = start + Math.floor(x / (candleW + 2));
+  return { x, y, price, idx };
+}
+
+function handleDrawClick(e) {
+  if (activeTool === 'cursor') return;
+  const d = _canvasToData(e);
+  if (activeTool === 'hline') {
+    drawings.push({ type: 'hline', price: d.price });
+    draw();
+  } else if (activeTool === 'tline') {
+    if (!drawState) {
+      drawState = { type: 'tline', idx1: d.idx, p1: d.price };
+    } else {
+      drawings.push({ type: 'tline', idx1: drawState.idx1, p1: drawState.p1, idx2: d.idx, p2: d.price });
+      drawState = null;
+      draw();
+    }
+  } else if (activeTool === 'rect') {
+    if (!drawState) {
+      drawState = { type: 'rect', idx1: d.idx, p1: d.price };
+    } else {
+      drawings.push({ type: 'rect', idx1: drawState.idx1, p1: drawState.p1, idx2: d.idx, p2: d.price });
+      drawState = null;
+      draw();
+    }
+  } else if (activeTool === 'vline') {
+    drawings.push({ type: 'vline', idx: d.idx });
+    draw();
+  }
+}
+
+function drawUserDrawings(mn, mx) {
+  const { start } = view();
+  const cw = candleW + 2;
+  const h  = _mainH;
+  const w  = cv.width  - AX_W;
+
+  for (const d of drawings) {
+    ctx.save();
+    if (d.type === 'hline') {
+      const y = py(d.price, mn, mx);
+      if (y < 0 || y > h) { ctx.restore(); continue; }
+      ctx.strokeStyle = 'rgba(255,255,255,.55)';
+      ctx.lineWidth   = 1; ctx.setLineDash([6,4]); ctx.globalAlpha = 0.85;
+      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
+      ctx.font = '9px IBM Plex Mono'; ctx.textAlign = 'right';
+      ctx.fillStyle = 'rgba(255,255,255,.6)'; ctx.globalAlpha = 1; ctx.setLineDash([]);
+      ctx.fillText(d.price.toFixed(2), w - 3, y - 3);
+    } else if (d.type === 'tline') {
+      const x1 = (d.idx1 - start) * cw + candleW / 2;
+      const x2 = (d.idx2 - start) * cw + candleW / 2;
+      const y1 = py(d.p1, mn, mx);
+      const y2 = py(d.p2, mn, mx);
+      ctx.strokeStyle = 'rgba(255,200,50,.75)';
+      ctx.lineWidth   = 1.5; ctx.setLineDash([]);
+      ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+      ctx.fillStyle = 'rgba(255,200,50,.9)';
+      [x1, x2].forEach((x, i) => {
+        ctx.beginPath(); ctx.arc(x, i === 0 ? y1 : y2, 3, 0, Math.PI * 2); ctx.fill();
+      });
+    } else if (d.type === 'rect') {
+      const x1 = (d.idx1 - start) * cw + candleW / 2;
+      const x2 = (d.idx2 - start) * cw + candleW / 2;
+      const y1 = py(Math.max(d.p1, d.p2), mn, mx);
+      const y2 = py(Math.min(d.p1, d.p2), mn, mx);
+      ctx.strokeStyle = 'rgba(77,142,255,.7)';
+      ctx.fillStyle   = 'rgba(77,142,255,.07)';
+      ctx.lineWidth   = 1.5; ctx.setLineDash([]);
+      ctx.fillRect(Math.min(x1,x2), y1, Math.abs(x2-x1), y2-y1);
+      ctx.strokeRect(Math.min(x1,x2), y1, Math.abs(x2-x1), y2-y1);
+    } else if (d.type === 'vline') {
+      const x = (d.idx - start) * cw + candleW / 2;
+      if (x < 0 || x > w) { ctx.restore(); continue; }
+      ctx.strokeStyle = 'rgba(255,255,255,.4)';
+      ctx.lineWidth   = 1; ctx.setLineDash([4,4]); ctx.globalAlpha = 0.75;
+      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke();
+      if (candles[d.idx]) {
+        const t = new Date(candles[d.idx].t * 1000);
+        ctx.font = '8px IBM Plex Mono'; ctx.textAlign = 'center';
+        ctx.fillStyle = 'rgba(255,255,255,.5)'; ctx.globalAlpha = 1; ctx.setLineDash([]);
+        ctx.fillText(t.toLocaleTimeString('en',{hour:'2-digit',minute:'2-digit',hour12:false}), x, 12);
+      }
+    }
+    ctx.restore();
+  }
+
+  // In-progress drawing preview
+  if (drawState && mX >= 0) {
+    const { mn: mn2, mx: mx2 } = priceRange(start, start + Math.floor(w / cw));
+    const y1 = py(drawState.p1, mn2, mx2);
+    const x1 = (drawState.idx1 - start) * cw + candleW / 2;
+    ctx.save();
+    ctx.strokeStyle = 'rgba(255,255,255,.3)';
+    ctx.lineWidth   = 1; ctx.setLineDash([4,4]);
+    if (drawState.type === 'tline') {
+      ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(mX, mY); ctx.stroke();
+    } else if (drawState.type === 'rect') {
+      const y2p = Math.min(y1, mY), y2h = Math.abs(mY - y1);
+      const x2p = Math.min(x1, mX), x2w = Math.abs(mX - x1);
+      ctx.strokeRect(x2p, y2p, x2w, y2h);
+      ctx.fillStyle = 'rgba(255,255,255,.04)'; ctx.fillRect(x2p, y2p, x2w, y2h);
+    }
+    ctx.restore();
+  }
+}
+
+// Right-click to delete nearest drawing
+cv.addEventListener('contextmenu', e => {
+  e.preventDefault();
+  if (!drawings.length) return;
+  if (drawState) { drawState = null; draw(); return; }
+  const r  = cv.getBoundingClientRect();
+  const sy = cv.height / r.height;
+  const y  = (e.clientY - r.top) * sy;
+  const { start } = view();
+  const { mn, mx } = priceRange(start, start + Math.floor((cv.width - AX_W) / (candleW + 2)));
+  const h  = cv.height - AX_H;
+  const price = mn + (1 - Math.max(0, Math.min(h, y)) / h) * (mx - mn);
+  const pxPerPt = h / (mx - mn || 1);
+  let minDist = Infinity, minIdx = -1;
+  drawings.forEach((d, i) => {
+    let dist = Infinity;
+    if (d.type === 'hline') dist = Math.abs(d.price - price) * pxPerPt;
+    else if (d.type === 'tline' || d.type === 'rect') dist = 12; // coarse hit
+    if (dist < minDist) { minDist = dist; minIdx = i; }
+  });
+  if (minIdx >= 0 && minDist < 14) { drawings.splice(minIdx, 1); draw(); }
+});
+
+
+// Escape to cancel in-progress drawing
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') {
+    if (drawState) { drawState = null; draw(); }
+    return;
+  }
+  if (e.key === 'h' && !e.ctrlKey && !e.metaKey && document.activeElement.tagName !== 'INPUT') setDrawTool('hline');
+  if (e.key === 't' && !e.ctrlKey && !e.metaKey && document.activeElement.tagName !== 'INPUT') setDrawTool('tline');
+  if (e.key === 'r' && !e.ctrlKey && !e.metaKey && document.activeElement.tagName !== 'INPUT') setDrawTool('rect');
+  if (e.key === 'v' && !e.ctrlKey && !e.metaKey && document.activeElement.tagName !== 'INPUT') setDrawTool('vline');
+});
+
+
+// ── Right Panel Tabs (Activity / History) ─────────────────────
+let _histLoaded = false;
+
+function switchRpTab(tab) {
+  const actBtn  = document.getElementById('tabActivity');
+  const histBtn = document.getElementById('tabHistory');
+  const logBody  = document.getElementById('logBody');
+  const histBody = document.getElementById('historyBody');
+  const clrBtn   = document.getElementById('logClrBtn');
+  if (tab === 'activity') {
+    actBtn.classList.add('active');   histBtn.classList.remove('active');
+    logBody.style.display  = '';      histBody.style.display = 'none';
+    if (clrBtn) clrBtn.style.display = '';
+  } else {
+    histBtn.classList.add('active');  actBtn.classList.remove('active');
+    histBody.style.display = '';      logBody.style.display  = 'none';
+    if (clrBtn) clrBtn.style.display = 'none';
+    if (!_histLoaded) _loadHistory();
+  }
+}
+
+async function _loadHistory() {
+  const body = document.getElementById('historyBody');
+  body.innerHTML = '<div class="hist-loading">Loading trades…</div>';
+  try {
+    const data = await fetch('/api/trade_history').then(r => r.json());
+    _histLoaded = true;
+    if (!data.length) { body.innerHTML = '<div class="hist-empty">No trades logged yet.</div>'; return; }
+    body.innerHTML = data.map(t => {
+      const pnl     = parseFloat(t.pnl  || 0);
+      const entry   = parseFloat(t.entry || 0);
+      const exitP   = parseFloat(t.exit_price || 0);
+      const cls     = pnl >= 0 ? 'pos' : 'neg';
+      const sideCls = (t.side || '').toUpperCase() === 'CE' ? 'hist-side-ce' : 'hist-side-pe';
+      return `<div class="hist-row">
+        <div class="hist-top">
+          <span class="hist-sym"><span class="${sideCls}">${t.side || '--'}</span> ${t.date || ''} ${t.time || ''}</span>
+          <span class="hist-pnl ${cls}">${pnl >= 0 ? '+' : ''}₹${pnl.toFixed(2)}</span>
+        </div>
+        <div class="hist-meta">
+          <span>Entry ₹${entry.toFixed(2)}</span>
+          <span>→ ₹${exitP.toFixed(2)}</span>
+          <span>${t.held_secs || '--'}s</span>
+          <span class="hist-reason">${t.reason || '--'}</span>
+        </div>
+      </div>`;
+    }).join('');
+  } catch(err) {
+    body.innerHTML = `<div class="hist-err">Error: ${err.message}</div>`;
+  }
+}
+
+// Re-load history on new trade close
+socket.on('trade_closed', () => { _histLoaded = false; });
+
+// ── Stock chart in main chart area ───────────────────────────
+async function openStockDetail(symbol) {
+  _activeStockSym = symbol;
+
+  // Show stock toggle buttons
+  ['ctStockSep','ctSS','ctSC','ctSP','ctSX'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.style.display = '';
+  });
+  // Label the buttons (filled with real names after fetch)
+  const ssBtn = document.getElementById('ctSS');
+  const scBtn = document.getElementById('ctSC');
+  const spBtn = document.getElementById('ctSP');
+  if (ssBtn) ssBtn.textContent = symbol;
+  if (scBtn) scBtn.textContent = 'CE…';
+  if (spBtn) spBtn.textContent = 'PE…';
+
+  // Clear all history arrays, auto-switch to 1-min TF (matches historical candle resolution)
+  stockSpotHist = []; stockCeHist = []; stockPeHist = [];
+  stockSpotCandles = []; stockCeCandles = []; stockPeCandles = [];
+
+  // Switch to 1m TF for historical + live continuity, then show spot
+  setTF(60, 'tf60');
+  setChart('stock_spot');
+
+  try {
+    const data = await fetch('/api/stock_detail/' + encodeURIComponent(symbol)).then(r => r.json());
+
+    // Pre-built historical candles from Zerodha API
+    stockSpotCandles = data.spot_candles || [];
+    stockCeCandles   = data.ce_candles   || [];
+    stockPeCandles   = data.pe_candles   || [];
+
+    // Live ticks accumulated by the bot since it started
+    stockSpotHist = data.spot_ticks || [];
+    stockCeHist   = data.ce_ticks   || [];
+    stockPeHist   = data.pe_ticks   || [];
+
+    // Update button labels with real option symbols
+    if (scBtn && data.ce_symbol) scBtn.textContent = data.ce_symbol.slice(-8);
+    if (spBtn && data.pe_symbol) spBtn.textContent = data.pe_symbol.slice(-8);
+
+    rebuildAndDraw();
+  } catch(e) {
+    console.error('Stock detail fetch failed:', e);
+  }
+}
+
+function clearStockChart() {
+  _activeStockSym = null;
+  stockSpotHist = []; stockCeHist = []; stockPeHist = [];
+  stockSpotCandles = []; stockCeCandles = []; stockPeCandles = [];
+  ['ctStockSep','ctSS','ctSC','ctSP','ctSX'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.style.display = 'none';
+  });
+  setChart('nifty');
+}
+
+function closeStockDetail() { clearStockChart(); }
+
+// Live-update stock chart ticks from SocketIO state
+function _sdLiveUpdate(multiStocks) {
+  if (!_activeStockSym || !multiStocks) return;
+  const d = multiStocks[_activeStockSym];
+  if (!d) return;
+  const now = Date.now() / 1000;
+  if (d.price    != null) { stockSpotHist.push({t:now, v:d.price});    if(stockSpotHist.length>200000)stockSpotHist.shift(); }
+  if (d.ce_price != null) { stockCeHist.push({t:now, v:d.ce_price});   if(stockCeHist.length>200000)stockCeHist.shift();   }
+  if (d.pe_price != null) { stockPeHist.push({t:now, v:d.pe_price});   if(stockPeHist.length>200000)stockPeHist.shift();   }
+  if (chartMode.startsWith('stock_')) rebuildAndDraw();
+}
+
+// ── MiniChart — self-contained candlestick chart for modal ────
+class MiniChart {
+  constructor(canvas) {
+    this.cv      = canvas;
+    this.ticks   = [];
+    this.candles = [];
+    this.TF      = 5;       // candle timeframe seconds
+    this.candleW = 8;
+    this.viewOff = 0;
+    this.label   = '';
+    this._mX = -1; this._mY = -1;
+    this._drag = false; this._dX = 0; this._dOff = 0;
+    this._bindEvents();
+    new ResizeObserver(() => this._onResize()).observe(canvas.parentElement);
+  }
+
+  setData(ticks, label) {
+    this.ticks = ticks || [];
+    this.label = label || '';
+    this.viewOff = 0;
+    this._buildCandles();
+    this._onResize();
+  }
+
+  addTick(t, v) {
+    if (v == null) return;
+    this.ticks.push({t, v});
+    if (this.ticks.length > 3000) this.ticks.shift();
+    this._buildCandles();
+    this.draw();
+  }
+
+  setTF(tf) { this.TF = tf; this._buildCandles(); this.draw(); }
+
+  _buildCandles() {
+    const b = new Map();
+    for (const {t, v} of this.ticks) {
+      const k = Math.floor(t / this.TF) * this.TF;
+      if (!b.has(k)) b.set(k, []);
+      b.get(k).push(v);
+    }
+    this.candles = [...b.entries()].sort((a,c) => a[0]-c[0])
+      .map(([t,a]) => ({t, o:a[0], h:Math.max(...a), l:Math.min(...a), c:a[a.length-1]}));
+  }
+
+  _onResize() {
+    const wrap = this.cv.parentElement;
+    if (!wrap) return;
+    this.cv.width  = wrap.clientWidth  || 500;
+    this.cv.height = wrap.clientHeight || 280;
+    this.draw();
+  }
+
+  draw() {
+    const cv = this.cv;
+    if (!cv.width || !cv.height) return;
+    const x  = cv.getContext('2d');
+    const W  = cv.width, H = cv.height;
+    const AW = 58, AH = 18;
+    const UP = '#00e87a', DN = '#ff3d5c';
+
+    x.clearRect(0,0,W,H);
+    x.fillStyle = '#050810'; x.fillRect(0,0,W,H);
+
+    if (!this.candles.length) {
+      x.fillStyle = 'rgba(78,101,133,.3)';
+      x.font = '11px IBM Plex Mono'; x.textAlign = 'center';
+      x.fillText('Waiting for ticks…', W/2, H/2);
+      return;
+    }
+
+    const cw  = this.candleW + 2;
+    const vis = Math.max(1, Math.floor((W-AW)/cw));
+    const end = Math.max(this.candles.length - this.viewOff, 0);
+    const st  = Math.max(end - vis, 0);
+    const sl  = this.candles.slice(st, end);
+
+    let mn = Infinity, mx = -Infinity;
+    for (const c of sl) { mn = Math.min(mn,c.l); mx = Math.max(mx,c.h); }
+    const pad = Math.max((mx-mn)*0.08, 1);
+    mn -= pad; mx += pad;
+    const rng = mx - mn || 1;
+    const py = v => (H-AH)*(1-(v-mn)/rng);
+
+    // Grid
+    for (let i=0; i<=4; i++) {
+      const v = mn+rng*(i/4), y = py(v);
+      x.strokeStyle='rgba(28,36,56,.9)'; x.lineWidth=1;
+      x.beginPath(); x.moveTo(0,y); x.lineTo(W-AW,y); x.stroke();
+      x.fillStyle='rgba(78,101,133,.5)';
+      x.font='8px IBM Plex Mono'; x.textAlign='right';
+      x.fillText(v.toFixed(1), W-3, y+3);
+    }
+
+    // Time axis
+    const every = Math.max(1, Math.floor(60/this.TF));
+    x.font='8px IBM Plex Mono'; x.textAlign='center';
+    for (let i=st; i<end; i++) {
+      if ((i-st)%every!==0) continue;
+      const cx = (i-st)*cw + this.candleW/2;
+      if (cx > W-AW) break;
+      x.strokeStyle='rgba(28,36,56,.6)'; x.lineWidth=1;
+      x.beginPath(); x.moveTo(cx,0); x.lineTo(cx,H-AH); x.stroke();
+      const d = new Date(this.candles[i].t*1000);
+      x.fillStyle='rgba(78,101,133,.38)';
+      x.fillText(d.toLocaleTimeString('en',{hour:'2-digit',minute:'2-digit',hour12:false}),cx,H-4);
+    }
+
+    // Candles
+    for (let i=st; i<end; i++) {
+      const c = this.candles[i];
+      const cx = (i-st)*cw;
+      const up = c.c>=c.o, col = up?UP:DN, cx2 = cx+this.candleW/2;
+      const bT = py(Math.max(c.o,c.c)), bB = py(Math.min(c.o,c.c));
+      const bH = Math.max(bB-bT, 1);
+      x.strokeStyle=col; x.lineWidth=1;
+      x.beginPath(); x.moveTo(cx2,py(c.h)); x.lineTo(cx2,bT);
+      x.moveTo(cx2,bB); x.lineTo(cx2,py(c.l)); x.stroke();
+      const isLast = i===end-1;
+      if (isLast) { x.shadowColor=col; x.shadowBlur=8; }
+      x.fillStyle=col; x.globalAlpha=0.9;
+      x.fillRect(cx+1,bT,this.candleW-2,bH);
+      x.globalAlpha=1; x.shadowBlur=0;
+    }
+
+    // Last price dashed line + tag
+    const lc = this.candles[end-1];
+    if (lc) {
+      const lp=lc.c, ly=py(lp);
+      x.save();
+      x.strokeStyle='rgba(0,212,255,.4)'; x.lineWidth=1; x.setLineDash([2,4]);
+      x.beginPath(); x.moveTo(0,ly); x.lineTo(W-AW,ly); x.stroke();
+      x.restore();
+      x.fillStyle='rgba(0,212,255,.9)';
+      x.fillRect(W-AW+1,ly-8,AW-2,16);
+      x.fillStyle='#030709'; x.font='bold 8px IBM Plex Mono'; x.textAlign='center';
+      x.fillText(lp.toFixed(1), W-AW+1+(AW-2)/2, ly+3);
+    }
+
+    // Label + OHLC
+    const ohlcEl = document.getElementById('sdOhlc');
+    if (lc && ohlcEl) {
+      const up = lc.c>=lc.o;
+      ohlcEl.innerHTML =
+        `<span style="color:var(--text3);font-size:9px">${this.label}</span> ` +
+        `O <b>${lc.o.toFixed(2)}</b> ` +
+        `<span style="color:${UP}">H <b>${lc.h.toFixed(2)}</b></span> ` +
+        `<span style="color:${DN}">L <b>${lc.l.toFixed(2)}</b></span> ` +
+        `<span style="color:${up?UP:DN}">C <b>${lc.c.toFixed(2)}</b></span>`;
+    }
+
+    // Crosshair
+    if (this._mX>=0 && this._mX<W-AW) {
+      x.save();
+      x.strokeStyle='rgba(78,101,133,.3)'; x.lineWidth=1; x.setLineDash([4,4]);
+      x.beginPath(); x.moveTo(this._mX,0); x.lineTo(this._mX,H-AH);
+      x.moveTo(0,this._mY); x.lineTo(W-AW,this._mY); x.stroke();
+      const price = mn+(1-this._mY/(H-AH))*rng;
+      x.fillStyle='rgba(77,142,255,.9)'; x.fillRect(W-AW,this._mY-8,AW,16);
+      x.fillStyle='#fff'; x.font='8px IBM Plex Mono'; x.textAlign='center';
+      x.fillText(price.toFixed(2),W-AW+AW/2,this._mY+3);
+      x.restore();
+      // Hovered candle OHLC
+      const idx = st + Math.floor(this._mX/cw);
+      const hc = this.candles[idx];
+      if (hc && ohlcEl) {
+        const up2 = hc.c>=hc.o;
+        ohlcEl.innerHTML =
+          `<span style="color:var(--text3);font-size:9px">${new Date(hc.t*1000).toLocaleTimeString()}</span> ` +
+          `O <b>${hc.o.toFixed(2)}</b> ` +
+          `<span style="color:${UP}">H <b>${hc.h.toFixed(2)}</b></span> ` +
+          `<span style="color:${DN}">L <b>${hc.l.toFixed(2)}</b></span> ` +
+          `<span style="color:${up2?UP:DN}">C <b>${hc.c.toFixed(2)}</b></span>`;
+      }
+    }
+  }
+
+  _bindEvents() {
+    const cv = this.cv;
+    cv.addEventListener('mousemove', e => {
+      const r=cv.getBoundingClientRect(), sx=cv.width/r.width, sy=cv.height/r.height;
+      if (this._drag) this.viewOff = Math.max(0, this._dOff - Math.round((e.clientX-this._dX)/(this.candleW+2)));
+      this._mX=(e.clientX-r.left)*sx; this._mY=(e.clientY-r.top)*sy; this.draw();
+    });
+    cv.addEventListener('mouseleave', () => { this._mX=-1; this._mY=-1; this._drag=false; this.draw(); });
+    cv.addEventListener('mousedown', e => { this._drag=true; this._dX=e.clientX; this._dOff=this.viewOff; cv.style.cursor='grabbing'; });
+    cv.addEventListener('mouseup', () => { this._drag=false; cv.style.cursor='crosshair'; });
+    cv.addEventListener('wheel', e => {
+      e.preventDefault();
+      this.candleW=Math.max(4,Math.min(32,this.candleW-Math.sign(e.deltaY)*1.5));
+      this.draw();
+    }, {passive:false});
+  }
+}
+
 // Init
-renderSideUI();
+loadWatchlist();
 requestAnimationFrame(resize);

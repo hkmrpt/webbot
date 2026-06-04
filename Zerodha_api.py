@@ -121,6 +121,50 @@ def place_sell(tradingsymbol: str, quantity: int | None = None) -> tuple[str | N
     return _post_order(_order_payload(tradingsymbol, "SELL", qty))
 
 
+def fetch_balance() -> dict | None:
+    """
+    Fetch live equity funds/margins from Zerodha.
+    Returns dict with keys: net, available, used, intraday_payin
+    or None on failure.
+    """
+    enctoken = _raw_enctoken()
+    cookie = (
+        f"kf_session={ZERODHA_CONFIG['kf_session']}; "
+        f"user_id={ZERODHA_CONFIG['user_id']}; "
+        f"public_token={ZERODHA_CONFIG['public_token']}; "
+        f"enctoken={enctoken}"
+    )
+    headers = {
+        "Host":            KITE_HOST,
+        "Accept":          "application/json, text/plain, */*",
+        "Authorization":   f"enctoken {enctoken}",
+        "Cookie":          cookie,
+        "User-Agent":      "Mozilla/5.0",
+        "x-kite-userid":  ZERODHA_CONFIG["user_id"],
+        "x-kite-version": ZERODHA_CONFIG.get("version", "3.0.0"),
+    }
+    try:
+        conn = http.client.HTTPSConnection(KITE_HOST, timeout=10)
+        conn.request("GET", "/oms/user/margins", headers=headers)
+        resp = conn.getresponse()
+        raw  = resp.read().decode("utf-8")
+        conn.close()
+        data = json.loads(raw)
+        if data.get("status") != "success":
+            logger.error("fetch_balance: API error — %s", data.get("message", raw[:200]))
+            return None
+        eq = data["data"]["equity"]
+        return {
+            "net":           round(eq.get("net", 0), 2),
+            "available":     round(eq["available"].get("live_balance", 0), 2),
+            "used":          round(eq["utilised"].get("debits", 0), 2),
+            "intraday_payin": round(eq["available"].get("intraday_payin", 0), 2),
+        }
+    except Exception as exc:
+        logger.error("fetch_balance error: %s", exc)
+        return None
+
+
 # ── CLI test ──────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import sys

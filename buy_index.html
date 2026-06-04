@@ -3,38 +3,41 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
-<title>Option Buy Robot v8.2</title>
+<title>Option Buy Robot v8.5</title>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet"/>
 <link rel="stylesheet" href="/static/css/buy_index.css"/>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
 </head>
 <body>
 
-<!-- BANNER -->
+<!-- ── BANNER ──────────────────────────────────────────────────── -->
 <div id="modeBanner" class="demo">
   <span id="bannerIcon">🔵</span>
   <span id="bannerText">DEMO MODE — Paper trading active</span>
-  <span id="bannerOid" style="font-size:9px;color:rgba(255,255,255,.3);margin-left:5px;font-weight:400;"></span>
+  <span id="bannerOid" class="banner-oid"></span>
 </div>
 
-<!-- TOPBAR -->
+<!-- ── TOPBAR ─────────────────────────────────────────────────── -->
 <div class="topbar">
   <div class="brand">
     <div class="brand-logo">⚡</div>
     Buy Bot
     <span class="v-badge">v8.2</span>
   </div>
-  <div class="sides-bar" id="topSidesBar" style="margin-right:10px;"></div>
+  <div class="sides-bar" id="topSidesBar"></div>
   <div class="ticker-strip">
-    <div class="ti"><span class="ti-k">NIFTY</span><span class="ti-v" id="tkN">--</span></div>
-    <div class="ti"><span class="ti-k">SLOPE</span><span class="ti-v" id="tkSlope" style="color:var(--blue)">--</span></div>
-    <div class="ti"><span class="ti-k">JUMP THR</span><span class="ti-v" id="tkJumpThr" style="color:var(--purple)">--</span></div>
+    <div class="ti"><span class="ti-k" id="tkNLabel">NIFTY</span><span class="ti-v" id="tkN">--</span></div>
+    <div class="ti"><span class="ti-k">CE</span><span class="ti-v" id="tkCE" style="color:var(--green)">--</span></div>
+    <div class="ti"><span class="ti-k">PE</span><span class="ti-v" id="tkPE" style="color:var(--red)">--</span></div>
+    <div class="ti"><span class="ti-k">SLOPE</span><span class="ti-v" id="tkSlope">--</span></div>
+    <div class="ti"><span class="ti-k">JUMP</span><span class="ti-v" id="tkJumpThr" style="color:var(--purple)">--</span></div>
     <div class="ti"><span class="ti-k">OPT ATR</span><span class="ti-v" id="tkOptAtr" style="color:var(--amber)">--</span></div>
     <div class="ti"><span class="ti-k">SPIKE</span><span class="ti-v" id="tkMove">--</span></div>
     <div class="ti"><span class="ti-k">CONFIRM</span><span class="ti-v" id="tkConfirm" style="color:var(--cyan)">--</span></div>
     <div class="ti"><span class="ti-k">REGIME</span><span class="ti-v" id="tkRegime" style="color:var(--cyan)">--</span></div>
-    <div class="ti"><span class="ti-k">AI SCORE</span><span class="ti-v" id="tkAiScore" style="color:var(--purple)">--</span></div>
-    <div class="ti"><span class="ti-k">TRAIL %</span><span class="ti-v" id="tkTrailPct" style="color:var(--amber)">--</span></div>
+    <div class="ti"><span class="ti-k">VOL ATR</span><span class="ti-v" id="tkVolAtr" style="color:var(--amber)">--</span></div>
+    <div class="ti"><span class="ti-k">AI</span><span class="ti-v" id="tkAiScore" style="color:var(--purple)">--</span></div>
+    <div class="ti"><span class="ti-k">TRAIL%</span><span class="ti-v" id="tkTrailPct" style="color:var(--amber)">--</span></div>
     <div class="ti"><span class="ti-k">LIVE P&amp;L</span><span class="ti-v" id="tkPL">--</span></div>
     <div class="ti"><span class="ti-k">SESSION</span><span class="ti-v" id="tkSess">--</span></div>
   </div>
@@ -53,84 +56,68 @@
   </div>
 </div>
 
+<!-- ── WORKSPACE ──────────────────────────────────────────────── -->
 <div class="workspace">
 
-  <!-- SIDEBAR -->
-  <div class="sidebar">
+  <!-- ── LEFT PANEL ───────────────────────────────────────────── -->
+  <div class="left-panel">
 
-    <!-- Mode toggle -->
-    <div class="ss">
-      <div class="ss-lbl">Trading Mode</div>
+    <!-- Trading Mode -->
+    <div class="lp-sec">
+      <div class="lp-lbl">Trading Mode</div>
       <div class="mode-wrap">
         <button class="m-btn demo active" id="demoBtnToggle" onclick="setMode('demo')">🔵 Demo</button>
         <button class="m-btn real"        id="realBtnToggle" onclick="setMode('real')">🔴 Real</button>
       </div>
       <div class="mode-warn" id="modeWarning">
-        ⚠ REAL mode — live orders placed.<br>
-        Check Zerodha enctoken is valid.
+        ⚠ REAL mode — live orders placed.<br>Check Zerodha enctoken is valid.
       </div>
       <div class="mode-info" id="modeInfo">Paper trading — no real orders</div>
     </div>
 
-    <!-- Dual token config -->
-    <div class="ss">
-      <div class="ss-lbl">Instruments</div>
-      <div class="token-panel">
-        <!-- CE row -->
-        <div class="token-row" id="ceRow">
-          <div class="token-header" onclick="toggleSide('CE')">
-            <div class="token-checkbox" id="ceChk"></div>
-            <div class="token-label-wrap">
-              <div class="token-side-tag ce">CE  <span style="font-weight:400;font-size:9px;color:var(--text3)">CALL</span></div>
-              <div class="token-side-sub" id="ceStrike">Not configured</div>
-            </div>
-            <div class="token-live" id="ceLive">--</div>
-          </div>
-          <div class="token-input-wrap">
-            <input type="text" id="ceInput" class="ce-focus" placeholder="NIFTY25CE22800/12345678"/>
-          </div>
-        </div>
-        <!-- PE row -->
-        <div class="token-row" id="peRow">
-          <div class="token-header" onclick="toggleSide('PE')">
-            <div class="token-checkbox" id="peChk"></div>
-            <div class="token-label-wrap">
-              <div class="token-side-tag pe">PE  <span style="font-weight:400;font-size:9px;color:var(--text3)">PUT</span></div>
-              <div class="token-side-sub" id="peStrike">Not configured</div>
-            </div>
-            <div class="token-live" id="peLive">--</div>
-          </div>
-          <div class="token-input-wrap">
-            <input type="text" id="peInput" class="pe-focus" placeholder="NIFTY25PE22800/98765432"/>
-          </div>
-        </div>
-        <!-- Both mode badge -->
-        <div class="both-badge" id="bothBadge">
-          ⚡ BOTH MODE — fires whichever side spikes first
-        </div>
+    <!-- Watchlist -->
+    <div class="lp-sec">
+      <div class="lp-lbl" style="display:flex;align-items:center;justify-content:space-between;">
+        <span>Watchlist <span id="wlCount" class="wl-badge"></span></span>
+        <button id="wlSelectAllBtn" class="wl-selall-btn" onclick="toggleSelectAll()" title="Select / Unselect all stocks">Select All</button>
       </div>
-      <div style="margin-top:8px;">
+      <!-- Stock search -->
+      <div class="wl-search-wrap">
+        <div class="wl-search-row">
+          <svg class="wl-search-icon" viewBox="0 0 20 20" fill="none"><circle cx="8.5" cy="8.5" r="5.5" stroke="currentColor" stroke-width="1.6"/><path d="M13 13l3.5 3.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+          <input type="text" id="wlSearchInput" class="wl-search-input" placeholder="Add stock e.g. RELIANCE…" autocomplete="off" spellcheck="false"/>
+          <span class="wl-spin" id="wlSpin" style="display:none">⟳</span>
+        </div>
+        <div class="wl-dropdown" id="wlDropdown"></div>
+      </div>
+      <!-- Watchlist items -->
+      <div class="wl-list" id="wlList">
+        <div class="wl-empty">No stocks — search above to add</div>
+      </div>
+      <div class="btn-group">
         <button class="btn btn-go" id="toggleBtn" onclick="toggleRobot()">🎯 Start Buy Robot</button>
         <button class="btn btn-exit" id="exitBtn" onclick="manualExit()">🚨 Exit Trade Now</button>
       </div>
     </div>
 
-    <!-- Spike meter -->
-    <div class="spike-wrap">
+    <!-- Spike Detector -->
+    <div class="lp-sec spike-sec">
       <div class="spike-hdr">
-        <span class="ss-lbl" style="margin-bottom:0">Spike Detector</span>
+        <span class="lp-lbl" style="margin-bottom:0">Spike Detector</span>
         <span class="spk-badge neu" id="spikeBadge">FLAT</span>
       </div>
-      <div class="spike-track">
-        <div class="spike-center"></div>
-        <div class="spike-fill" id="spikeFill" style="left:50%;width:0%;background:var(--text3)"></div>
+      <div class="spike-gauge-wrap">
+        <div class="spike-gauge">
+          <div class="spike-center-mark"></div>
+          <div class="spike-fill" id="spikeFill" style="left:50%;width:0%;background:var(--text3)"></div>
+        </div>
+        <div class="spike-labels">
+          <span id="spikeL">−7 pts</span>
+          <span class="spike-mid-lbl">prev tick</span>
+          <span id="spikeR">+7 pts</span>
+        </div>
       </div>
-      <div class="spike-labels">
-        <span id="spikeL">−7 pts</span>
-        <span style="color:var(--text2)">prev tick</span>
-        <span id="spikeR">+7 pts</span>
-      </div>
-      <div class="spike-val neu" id="spikeVal">0.00 pts</div>
+      <div class="spike-val-hero neu" id="spikeVal">0.00 pts</div>
       <div class="spike-sub" id="spikeSub">Waiting for ticks…</div>
 
       <div class="confirm-wrap" id="confirmWrap">
@@ -170,15 +157,15 @@
     </div>
 
     <!-- Session P&L -->
-    <div class="ss">
-      <div class="ss-lbl">Session P&amp;L</div>
-      <div class="pnl-big">
+    <div class="lp-sec pnl-sec">
+      <div class="lp-lbl">Session P&amp;L</div>
+      <div class="pnl-hero-wrap">
         <div class="pnl-total zero" id="sessionPL">₹ --</div>
         <div class="pnl-sub" id="tradeCount">0 trades · 0W / 0L</div>
       </div>
     </div>
 
-    <!-- Stats -->
+    <!-- Stat Grid -->
     <div class="stat-grid">
       <div class="sc"><div class="sc-k">Trades</div><div class="sc-v b" id="stTrades">0</div></div>
       <div class="sc"><div class="sc-k">Win Rate</div><div class="sc-v g" id="stWin">--</div></div>
@@ -187,75 +174,187 @@
     </div>
 
     <!-- AI Brain -->
-    <div class="ss">
-      <div class="ss-lbl">AI Brain</div>
-      <div class="ai-regime-row">
-        <span class="ai-regime-badge unknown" id="aiRegimeBadge">unknown</span>
-        <div class="ai-score-wrap">
-          <div class="ai-score-track">
-            <div class="ai-score-fill" id="aiScoreFill" style="width:0%"></div>
+    <div class="lp-sec ai-sec">
+      <div class="lp-lbl">AI Brain</div>
+      <div class="ai-hero-row">
+        <!-- SVG ring for AI score -->
+        <div class="ai-ring-wrap">
+          <svg class="ai-ring-svg" viewBox="0 0 64 64">
+            <circle class="ai-ring-bg"   cx="32" cy="32" r="26"/>
+            <circle class="ai-ring-prog" id="aiRingProg" cx="32" cy="32" r="26"
+                    stroke-dasharray="163.4" stroke-dashoffset="163.4"/>
+          </svg>
+          <div class="ai-ring-center">
+            <span class="ai-score-val" id="aiScoreVal">--</span>
+            <span class="ai-ring-sub">SCORE</span>
           </div>
-          <span class="ai-score-val" id="aiScoreVal">--</span>
+        </div>
+        <!-- hidden bar — kept for JS compat -->
+        <div style="display:none">
+          <div class="ai-score-track"><div class="ai-score-fill" id="aiScoreFill"></div></div>
+        </div>
+        <div class="ai-right-col">
+          <span class="ai-regime-badge unknown" id="aiRegimeBadge">unknown</span>
+          <div class="ai-momentum-row">
+            <span class="ai-k">Momentum</span>
+            <div class="momentum-track">
+              <div class="momentum-fill" id="momentumFill" style="width:0%"></div>
+            </div>
+            <span class="momentum-lbl" id="momentumLbl">--</span>
+          </div>
         </div>
       </div>
       <div class="ai-row"><span class="ai-k">Trades learned</span><span class="ai-v" id="aiBrainTrades">0</span></div>
       <div class="ai-row"><span class="ai-k">AI win rate</span><span class="ai-v g" id="aiBrainWR">--</span></div>
       <div class="ai-row"><span class="ai-k">Model ready</span><span class="ai-v" id="aiBrainReady"><span class="ai-ready-dot off"></span> Learning…</span></div>
-      <div class="ai-momentum-wrap">
-        <span class="ai-k">Momentum</span>
-        <div class="momentum-track">
-          <div class="momentum-fill" id="momentumFill" style="width:0%"></div>
-        </div>
-        <span class="momentum-lbl" id="momentumLbl">--</span>
+    </div>
+
+    <!-- Active Filters (collapsible) -->
+    <div class="lp-sec filter-sec" id="filterSec">
+      <div class="filter-toggle-hdr" onclick="toggleFilters()">
+        <span class="lp-lbl" style="margin-bottom:0">Active Filters</span>
+        <span class="filter-chevron" id="filterChevron">▶</span>
+      </div>
+      <div class="filter-body" id="filterBody">
+        <div class="filter-row"><span class="filter-name">Confirm ticks (adaptive)</span><span class="fval fv-ok" id="fvConfirm">--</span></div>
+        <div class="filter-row"><span class="filter-name">Confirm ATR thresholds</span><span class="fval fv-ok" id="fvConfirmAtr">--</span></div>
+        <div class="filter-row"><span class="filter-name">Regression window</span><span class="fval fv-ok" id="fvReg">--</span></div>
+        <div class="filter-row"><span class="filter-name">Stop loss (tiered)</span><span class="fval fv-warn" id="fvSL">--</span></div>
+        <div class="filter-row"><span class="filter-name">SL phase 1 secs</span><span class="fval fv-ok" id="fvSLsecs">--</span></div>
+        <div class="filter-row"><span class="filter-name">Trail % (ATR+Profit-Tier)</span><span class="fval fv-ok" id="fvTrail">--</span></div>
+        <div class="filter-row"><span class="filter-name">Profit-tier threshold</span><span class="fval fv-ok" id="fvProfitThreshold">≥5%</span></div>
+        <div class="filter-row"><span class="filter-name">Trail ATR thresholds</span><span class="fval fv-ok" id="fvTrailAtr">--</span></div>
+        <div class="filter-row"><span class="filter-name">Spike threshold</span><span class="fval fv-ok" id="fvJump">--</span></div>
+        <div class="filter-row" id="autoJumpFilterRow"><span class="filter-name">Auto-jump ATR</span><span class="fval auto-on" id="fvJumpAtr">--</span></div>
+        <div class="filter-row"><span class="filter-name">Time gate</span><span class="fval fv-ok" id="fvTimeGate">--</span></div>
+        <div class="filter-row"><span class="filter-name">Volume factor</span><span class="fval fv-ok">1.5×</span></div>
+        <div class="filter-row"><span class="filter-name">SL cooldown</span><span class="fval fv-warn" id="fvCooldown">--</span></div>
+        <div class="filter-row"><span class="filter-name">Daily loss limit</span><span class="fval fv-warn" id="fvLossLim">--</span></div>
+        <div class="filter-row"><span class="filter-name">Profit target</span><span class="fval fv-ok" id="fvProfitTgt">--</span></div>
+        <div class="filter-row"><span class="filter-name">AI score threshold</span><span class="fval fv-ok" id="fvAiThreshold">0.42</span></div>
+        <div class="filter-row"><span class="filter-name">Breakeven trigger</span><span class="fval fv-ok" id="fvBreakeven">--</span></div>
+        <div class="filter-row"><span class="filter-name">NIFTY reversal exit</span><span class="fval fv-ok" id="fvNiftyReversal">ON</span></div>
+        <div class="filter-row"><span class="filter-name">Move velocity thr</span><span class="fval fv-ok" id="fvMoveVelocity">--</span></div>
+        <div class="filter-divider">── Advanced v8.5 ──</div>
+        <div class="filter-row"><span class="filter-name">Breakout Filter</span><span class="fval fv-ok" id="fvBreakout">--</span></div>
+        <div class="filter-row"><span class="filter-name">Consol. Range</span><span class="fval fv-ok" id="fvBreakoutRange">--</span></div>
+        <div class="filter-row"><span class="filter-name">Vol Gate</span><span class="fval fv-ok" id="fvVolGate">--</span></div>
+        <div class="filter-row"><span class="filter-name">Pre-spike ATR</span><span class="fval fv-ok" id="fvVolAtr">--</span></div>
+        <div class="filter-row"><span class="filter-name">Chop Rate</span><span class="fval fv-ok" id="fvChopRate">--</span></div>
       </div>
     </div>
 
-    <!-- Filters -->
-    <div class="filter-panel">
-      <div class="ss-lbl">Active Filters</div>
-      <div class="filter-row"><span class="filter-name">Confirm ticks (adaptive)</span><span class="fval fv-ok" id="fvConfirm">--</span></div>
-      <div class="filter-row"><span class="filter-name">Confirm ATR thresholds</span><span class="fval fv-ok" id="fvConfirmAtr">--</span></div>
-      <div class="filter-row"><span class="filter-name">Regression window</span><span class="fval fv-ok" id="fvReg">--</span></div>
-      <div class="filter-row"><span class="filter-name">Stop loss (tiered)</span><span class="fval fv-warn" id="fvSL">--</span></div>
-      <div class="filter-row"><span class="filter-name">SL phase 1 secs</span><span class="fval fv-ok" id="fvSLsecs">--</span></div>
-      <div class="filter-row"><span class="filter-name">Trail % (ATR+Profit-Tier)</span><span class="fval fv-ok" id="fvTrail">--</span></div>
-      <div class="filter-row"><span class="filter-name">Profit-tier threshold</span><span class="fval fv-ok" id="fvProfitThreshold">≥5%</span></div>
-      <div class="filter-row"><span class="filter-name">Trail ATR thresholds</span><span class="fval fv-ok" id="fvTrailAtr">--</span></div>
-      <div class="filter-row">
-        <span class="filter-name">Spike threshold</span>
-        <span class="fval fv-ok" id="fvJump">--</span>
-      </div>
-      <div class="filter-row" id="autoJumpFilterRow">
-        <span class="filter-name">Auto-jump ATR</span>
-        <span class="fval auto-on" id="fvJumpAtr" style="background:var(--cyan-d);color:var(--cyan)">--</span>
-      </div>
-      <div class="filter-row"><span class="filter-name">Time gate</span><span class="fval fv-ok" id="fvTimeGate">--</span></div>
-      <div class="filter-row"><span class="filter-name">Volume factor</span><span class="fval fv-ok">1.5×</span></div>
-      <div class="filter-row"><span class="filter-name">SL cooldown</span><span class="fval fv-warn" id="fvCooldown">--</span></div>
-      <div class="filter-row"><span class="filter-name">Daily loss limit</span><span class="fval fv-warn" id="fvLossLim">--</span></div>
-      <div class="filter-row"><span class="filter-name">Profit target</span><span class="fval fv-ok" id="fvProfitTgt">--</span></div>
-      <div class="filter-row"><span class="filter-name">AI score threshold</span><span class="fval fv-ok" id="fvAiThreshold">0.42</span></div>
-      <div class="filter-row"><span class="filter-name">Breakeven trigger</span><span class="fval fv-ok" id="fvBreakeven">--</span></div>
-      <div class="filter-row"><span class="filter-name">NIFTY reversal exit</span><span class="fval fv-ok" id="fvNiftyReversal">ON</span></div>
-      <div class="filter-row"><span class="filter-name">Move velocity thr</span><span class="fval fv-ok" id="fvMoveVelocity">--</span></div>
-    </div>
+  </div><!-- /left-panel -->
 
-    <!-- Active trade card -->
-    <div class="ss">
-      <div class="ss-lbl">Active Trade</div>
+  <!-- ── CHART AREA ─────────────────────────────────────────────── -->
+  <div class="chart-area">
+    <div class="chart-hdr">
+      <span class="ch-title" id="chartTitle">NIFTY 50</span>
+      <div class="tf-pills">
+        <button class="tf-btn active" onclick="setTF(5,'tf5')"      id="tf5">5s</button>
+        <button class="tf-btn"        onclick="setTF(15,'tf15')"    id="tf15">15s</button>
+        <button class="tf-btn"        onclick="setTF(60,'tf60')"    id="tf60">1m</button>
+        <button class="tf-btn"        onclick="setTF(180,'tf180')"  id="tf180">3m</button>
+        <button class="tf-btn"        onclick="setTF(300,'tf300')"  id="tf300">5m</button>
+        <button class="tf-btn"        onclick="setTF(900,'tf900')"  id="tf900">15m</button>
+        <button class="tf-btn"        onclick="setTF(1800,'tf1800')" id="tf1800">30m</button>
+        <button class="tf-btn"        onclick="setTF(3600,'tf3600')" id="tf3600">1H</button>
+      </div>
+      <div class="chart-toggle">
+        <button class="ct-btn active" id="ctN"    onclick="setChart('nifty')">Nifty</button>
+        <button class="ct-btn"        id="ctO"    onclick="setChart('option')">Option</button>
+        <div class="ct-sep" id="ctStockSep" style="display:none"></div>
+        <button class="ct-btn ct-stock" id="ctSS" onclick="setChart('stock_spot')" style="display:none">Spot</button>
+        <button class="ct-btn ct-stock" id="ctSC" onclick="setChart('stock_ce')"   style="display:none">CE</button>
+        <button class="ct-btn ct-stock" id="ctSP" onclick="setChart('stock_pe')"   style="display:none">PE</button>
+        <button class="ct-btn ct-clr"   id="ctSX" onclick="clearStockChart()"      style="display:none" title="Back to Nifty">✕</button>
+      </div>
+      <div class="ohlc-bar">
+        <span>O:<b id="oO">--</b></span>
+        <span style="color:var(--green)">H:<b id="oH">--</b></span>
+        <span style="color:var(--red)">L:<b id="oL">--</b></span>
+        <span>C:<b id="oC">--</b></span>
+      </div>
+    </div>
+    <!-- Drawing Toolbar -->
+    <div class="draw-toolbar">
+      <!-- Cursor -->
+      <button class="dt-btn active" id="dtCursor" onclick="setDrawTool('cursor')" title="Cursor (Esc)">
+        <svg viewBox="0 0 16 16" fill="currentColor"><path d="M2 2l5.5 13 2-5 5-2z"/></svg>
+      </button>
+      <div class="dt-sep"></div>
+      <!-- Drawing tools -->
+      <button class="dt-btn" id="dtHline" onclick="setDrawTool('hline')" title="Horizontal Line (H)">
+        <svg viewBox="0 0 16 16" stroke="currentColor" stroke-width="1.8" fill="none"><line x1="1" y1="8" x2="15" y2="8"/><circle cx="1" cy="8" r="1.2" fill="currentColor"/><circle cx="15" cy="8" r="1.2" fill="currentColor"/></svg>
+      </button>
+      <button class="dt-btn" id="dtTline" onclick="setDrawTool('tline')" title="Trend Line (T)">
+        <svg viewBox="0 0 16 16" stroke="currentColor" stroke-width="1.8" fill="none"><line x1="2" y1="13" x2="14" y2="3"/><circle cx="2" cy="13" r="1.2" fill="currentColor"/><circle cx="14" cy="3" r="1.2" fill="currentColor"/></svg>
+      </button>
+      <button class="dt-btn" id="dtRect" onclick="setDrawTool('rect')" title="Rectangle (R)">
+        <svg viewBox="0 0 16 16" stroke="currentColor" stroke-width="1.8" fill="none"><rect x="2" y="4" width="12" height="8" rx="1"/></svg>
+      </button>
+      <button class="dt-btn" id="dtVline" onclick="setDrawTool('vline')" title="Vertical Line (V)">
+        <svg viewBox="0 0 16 16" stroke="currentColor" stroke-width="1.8" fill="none"><line x1="8" y1="1" x2="8" y2="15"/><circle cx="8" cy="1" r="1.2" fill="currentColor"/><circle cx="8" cy="15" r="1.2" fill="currentColor"/></svg>
+      </button>
+      <div class="dt-sep"></div>
+      <!-- Chart type -->
+      <div class="dt-ct-group">
+        <button class="dt-ct active" id="ctypeCandle" onclick="setChartType('candle')" title="Candlestick">C</button>
+        <button class="dt-ct"        id="ctypeHA"     onclick="setChartType('ha')"     title="Heikin-Ashi">HA</button>
+        <button class="dt-ct"        id="ctypeLine"   onclick="setChartType('line')"   title="Line">L</button>
+        <button class="dt-ct"        id="ctypeArea"   onclick="setChartType('area')"   title="Area">A</button>
+      </div>
+      <div class="dt-sep"></div>
+      <!-- Clear drawings -->
+      <button class="dt-btn dt-clr" onclick="clearDrawings()" title="Clear all drawings">
+        <svg viewBox="0 0 16 16" stroke="currentColor" stroke-width="1.8" fill="none"><path d="M4 4l8 8M12 4l-8 8"/></svg>
+      </button>
+    </div>
+    <div class="chart-wrap" id="chartWrap">
+      <canvas id="cv"></canvas>
+      <div class="x-tip"    id="xTip"></div>
+      <div class="price-tag" id="priceTag"></div>
+      <div class="lvl-tag lvl-ref"   id="tagRef">REF</div>
+      <div class="lvl-tag lvl-entry" id="tagEntry">ENTRY</div>
+      <div class="lvl-tag lvl-sl"    id="tagSL">SL</div>
+      <div class="lvl-tag lvl-trail" id="tagTrail">TRAIL</div>
+    </div>
+  </div>
+
+  <!-- ── RIGHT PANEL ───────────────────────────────────────────── -->
+  <div class="right-panel">
+
+    <!-- Active Trade -->
+    <div class="rp-trade-sec">
+      <!-- Live P&L hero display -->
+      <div class="rp-hdr">
+        <span class="lp-lbl" style="margin-bottom:0">Active Trade</span>
+        <div class="live-pnl-hero" id="livePnlHero">--</div>
+      </div>
+
       <div class="trade-card" id="tradeCard">
         <div class="tc-hdr">
           <span class="tc-side none" id="tcSide">No trade</span>
           <span class="tc-badge wait" id="tcBadge">Waiting</span>
         </div>
+
+        <!-- Timer row -->
+        <div class="tc-timer-row" id="tcTimerRow" style="display:none">
+          <span class="tt-k">Held</span>
+          <span class="lv c" id="tcHeld">--</span>
+          <div class="tc-timer-bar">
+            <div class="tc-timer-fill" id="tcTimerFill" style="width:0%"></div>
+          </div>
+        </div>
+
         <div class="lr"><span class="lk">Buy Price</span><span class="lv b" id="tcEntry">--</span></div>
         <div class="lr"><span class="lk">Current</span><span class="lv" id="tcCurrent">--</span></div>
         <div class="lr">
-          <span class="lk">Stop Loss <span style="color:var(--text3)" id="tcSlPct">(15%)</span></span>
+          <span class="lk">Stop Loss <span class="lk-sub" id="tcSlPct">(15%)</span></span>
           <span class="lv r" id="tcSL">--</span>
         </div>
         <div class="lr" id="tcTrailRow" style="display:none">
-          <span class="lk">Trail Price <span style="color:var(--text3)" id="tcTrPct">(25%)</span></span>
+          <span class="lk">Trail Price <span class="lk-sub" id="tcTrPct">(25%)</span></span>
           <span class="lv y" id="tcTrail">--</span>
         </div>
         <div class="lr" id="tcAtrRow" style="display:none">
@@ -286,67 +385,44 @@
         <div class="lr" id="tcPeakPctRow" style="display:none"><span class="lk">Peak Profit %</span><span class="lv g" id="tcPeakPct">--</span></div>
         <div class="lr" id="tcProfRow"    style="display:none"><span class="lk">Peak Profit ₹</span><span class="lv g" id="tcPeakP">--</span></div>
         <div class="lr"><span class="lk">Qty</span><span class="lv" id="tcQty">--</span></div>
-        <div class="lr"><span class="lk">Held</span><span class="lv c" id="tcHeld">--</span></div>
+        <!-- kept for JS compat, not shown in main card anymore (livePnlHero is the hero) -->
         <div class="lr"><span class="lk">Live P&amp;L</span><span class="lv" id="tcLivePL">--</span></div>
       </div>
+
       <div class="oid-row" id="orderIdRow">
         <div class="oid-lbl">📋 Order IDs</div>
         <div class="oid-b" id="oidBuy">—</div>
         <div class="oid-s" id="oidSell">—</div>
       </div>
-    </div>
+    </div><!-- /rp-trade-sec -->
 
-  </div><!-- /sidebar -->
-
-  <!-- CHART -->
-  <div class="chart-area">
-    <div class="chart-hdr">
-      <span class="ch-title" id="chartTitle">NIFTY 50</span>
-      <div class="tf-pills">
-        <button class="tf-btn active" onclick="setTF(5,'tf5')"     id="tf5">5s</button>
-        <button class="tf-btn"        onclick="setTF(15,'tf15')"   id="tf15">15s</button>
-        <button class="tf-btn"        onclick="setTF(60,'tf60')"   id="tf60">1m</button>
-        <button class="tf-btn"        onclick="setTF(300,'tf300')" id="tf300">5m</button>
+    <!-- Activity / History tabs -->
+    <div class="rp-log-sec">
+      <div class="log-hdr">
+        <div class="rp-tabs">
+          <button class="rp-tab active" id="tabActivity" onclick="switchRpTab('activity')">Activity</button>
+          <button class="rp-tab" id="tabHistory" onclick="switchRpTab('history')">History</button>
+        </div>
+        <button class="log-clr" id="logClrBtn" onclick="clearLogs()">clear</button>
       </div>
-      <div class="chart-toggle">
-        <button class="ct-btn active" id="ctN" onclick="setChart('nifty')">Nifty</button>
-        <button class="ct-btn"        id="ctO" onclick="setChart('option')">Option</button>
-      </div>
-      <div class="ohlc-bar">
-        <span>O:<b id="oO">--</b></span>
-        <span style="color:var(--green)">H:<b id="oH">--</b></span>
-        <span style="color:var(--red)">L:<b id="oL">--</b></span>
-        <span>C:<b id="oC">--</b></span>
+      <div class="log-scroll" id="logBody"></div>
+      <div class="log-scroll" id="historyBody" style="display:none">
+        <div class="hist-empty">Click History tab to load trades</div>
       </div>
     </div>
-    <div class="chart-wrap" id="chartWrap">
-      <canvas id="cv"></canvas>
-      <div class="x-tip"   id="xTip"></div>
-      <div class="price-tag" id="priceTag"></div>
-      <div class="lvl-tag lvl-ref"   id="tagRef">REF</div>
-      <div class="lvl-tag lvl-entry" id="tagEntry">ENTRY</div>
-      <div class="lvl-tag lvl-sl"    id="tagSL">SL</div>
-      <div class="lvl-tag lvl-trail" id="tagTrail">TRAIL</div>
-    </div>
-  </div>
 
-  <!-- LOG -->
-  <div class="log-panel">
-    <div class="log-hdr">
-      Activity
-      <button class="log-clr" onclick="clearLogs()">clear</button>
-    </div>
-    <div class="log-scroll" id="logBody"></div>
-  </div>
+  </div><!-- /right-panel -->
 
 </div><!-- /workspace -->
 
+<!-- ── STATUS BAR ─────────────────────────────────────────────── -->
 <div class="sbar">
   <div class="s-dot" id="sDot"></div>
-  <span id="sMsg">Ready — check CE and/or PE, enter tokens</span>
+  <span id="sMsg">Ready — add stocks to watchlist and start</span>
   <span class="s-sep">·</span>
   <span id="sFilterMsg" style="color:var(--text3)"></span>
 </div>
+
 
 <script src="/static/js/buy_index.js"></script>
 </body>
