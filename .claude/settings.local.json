@@ -22,7 +22,8 @@
       "Bash(mkdir -p /c/Users/hkmrp/PycharmProjects/webbot/algobot/static/js)",
       "Bash(mkdir -p /c/Users/hkmrp/PycharmProjects/webbot/algobot/logs)",
       "Bash(pip install:*)",
-      "Bash(grep -h \"^from \\\\|^import \" *.py)"
+      "Bash(grep -h \"^from \\\\|^import \" *.py)",
+      "WebFetch(domain:iqoption.com)"
     ]
   }
 }

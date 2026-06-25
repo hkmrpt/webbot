@@ -229,6 +229,116 @@ def fetch_balance() -> dict | None:
         return None
 
 
+def fetch_orders() -> list | None:
+    """
+    Fetch today's orders from Zerodha (GET /oms/orders).
+    Returns list of order dicts or None on failure.
+    """
+    enctoken = _raw_enctoken()
+    cookie = (
+        f"kf_session={ZERODHA_CONFIG['kf_session']}; "
+        f"user_id={ZERODHA_CONFIG['user_id']}; "
+        f"public_token={ZERODHA_CONFIG['public_token']}; "
+        f"enctoken={enctoken}"
+    )
+    headers = {
+        "Host":            KITE_HOST,
+        "Accept":          "application/json, text/plain, */*",
+        "Authorization":   f"enctoken {enctoken}",
+        "Cookie":          cookie,
+        "User-Agent":      "Mozilla/5.0",
+        "x-kite-userid":  ZERODHA_CONFIG["user_id"],
+        "x-kite-version": ZERODHA_CONFIG.get("version", "3.0.0"),
+    }
+    try:
+        conn = http.client.HTTPSConnection(KITE_HOST, timeout=10)
+        conn.request("GET", "/oms/orders", headers=headers)
+        resp = conn.getresponse()
+        raw  = resp.read().decode("utf-8")
+        conn.close()
+        data = json.loads(raw)
+        if data.get("status") == "success":
+            return data.get("data", [])
+        logger.error("fetch_orders: %s", data.get("message", raw[:200]))
+        return None
+    except Exception as exc:
+        logger.error("fetch_orders error: %s", exc)
+        return None
+
+
+def fetch_trades() -> list | None:
+    """
+    Fetch today's executed trades from Zerodha (GET /oms/trades).
+    Returns list of trade dicts or None on failure.
+    """
+    enctoken = _raw_enctoken()
+    cookie = (
+        f"kf_session={ZERODHA_CONFIG['kf_session']}; "
+        f"user_id={ZERODHA_CONFIG['user_id']}; "
+        f"public_token={ZERODHA_CONFIG['public_token']}; "
+        f"enctoken={enctoken}"
+    )
+    headers = {
+        "Host":            KITE_HOST,
+        "Accept":          "application/json, text/plain, */*",
+        "Authorization":   f"enctoken {enctoken}",
+        "Cookie":          cookie,
+        "User-Agent":      "Mozilla/5.0",
+        "x-kite-userid":  ZERODHA_CONFIG["user_id"],
+        "x-kite-version": ZERODHA_CONFIG.get("version", "3.0.0"),
+    }
+    try:
+        conn = http.client.HTTPSConnection(KITE_HOST, timeout=10)
+        conn.request("GET", "/oms/trades", headers=headers)
+        resp = conn.getresponse()
+        raw  = resp.read().decode("utf-8")
+        conn.close()
+        data = json.loads(raw)
+        if data.get("status") == "success":
+            return data.get("data", [])
+        logger.error("fetch_trades: %s", data.get("message", raw[:200]))
+        return None
+    except Exception as exc:
+        logger.error("fetch_trades error: %s", exc)
+        return None
+
+def fetch_positions() -> dict | None:
+    """
+    Fetch current positions from Zerodha (GET /oms/portfolio/positions).
+    Returns dict with 'net' and 'day' lists, or None on failure.
+    """
+    enctoken = _raw_enctoken()
+    cookie = (
+        f"kf_session={ZERODHA_CONFIG['kf_session']}; "
+        f"user_id={ZERODHA_CONFIG['user_id']}; "
+        f"public_token={ZERODHA_CONFIG['public_token']}; "
+        f"enctoken={enctoken}"
+    )
+    headers = {
+        "Host":            KITE_HOST,
+        "Accept":          "application/json, text/plain, */*",
+        "Authorization":   f"enctoken {enctoken}",
+        "Cookie":          cookie,
+        "User-Agent":      "Mozilla/5.0",
+        "x-kite-userid":  ZERODHA_CONFIG["user_id"],
+        "x-kite-version": ZERODHA_CONFIG.get("version", "3.0.0"),
+    }
+    try:
+        conn = http.client.HTTPSConnection(KITE_HOST, timeout=10)
+        conn.request("GET", "/oms/portfolio/positions", headers=headers)
+        resp = conn.getresponse()
+        raw  = resp.read().decode("utf-8")
+        conn.close()
+        data = json.loads(raw)
+        if data.get("status") == "success":
+            return data.get("data", {})
+        logger.error("fetch_positions: %s", data.get("message", raw[:200]))
+        return None
+    except Exception as exc:
+        logger.error("fetch_positions error: %s", exc)
+        return None
+
+
 # ── CLI test ──────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import sys

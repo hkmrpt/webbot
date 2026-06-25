@@ -23,6 +23,7 @@ from collections import deque
 from datetime import datetime
 
 from exit_brain import ExitBrain
+from exit_analyzer import ExitAnalyzer
 from config import (
     BUY_QTY, BUY_SL_PCT, BUY_TRAIL_PCT, LOT_SIZE,
     OPTION_ATR_PERIOD,
@@ -41,6 +42,8 @@ from config import (
     SLOW_MOVE_TIMEOUT_SECS, SLOW_MOVE_MIN_PROFIT,
     FAST_MOVE_TIMEOUT_SECS, FAST_MOVE_MIN_PROFIT,
     PARTIAL_BOOKING_ENABLED, PARTIAL_BOOKING_TARGETS,
+    VOLUME_DRYUP_EXIT, VOLUME_DRYUP_RATIO, VOLUME_DRYUP_MIN_PROFIT,
+    MOMENTUM_STALL_EXIT, MOMENTUM_STALL_TICKS, MOMENTUM_STALL_MIN_PROFIT,
 )
 
 _csv_lock = threading.Lock()
@@ -180,9 +183,12 @@ class BuyExitStrategy:
         self._open_time          = None
         self._opt_price_hist     = deque(maxlen=OPTION_ATR_PERIOD + 1)
         self._trail_pct_override = None
-        self._brain              = ExitBrain()   # AI brain — persists across trades
-        self._partial_done: list = []            # indices of partial targets already booked
-        self._original_qty: int  = 1             # qty at open (before any partial sells)
+        self._brain              = ExitBrain()          # AI brain — persists across trades
+        self._exit_analyzer      = ExitAnalyzer()      # 10-signal exit analysis engine
+        self._partial_done: list = []                   # indices of partial targets already booked
+        self._original_qty: int  = 1                    # qty at open (before any partial sells)
+        self._no_new_high_count: int = 0                # ticks since last new high
+        self._profit_history: list = []                 # profit % each tick for decay detection
 
     def open_leg(
         self,
@@ -214,6 +220,8 @@ class BuyExitStrategy:
         qty = qty_override if (qty_override is not None and qty_override >= 1) else BUY_QTY
         self._partial_done  = []
         self._original_qty  = qty
+        self._no_new_high_count = 0
+        self._profit_history = []
 
         self._leg = {
             "side":                 side,
@@ -266,6 +274,9 @@ class BuyExitStrategy:
             leg["peak_price"]      = price
             leg["peak_profit"]     = round((price - leg["entry"]) * qty_full, 2)
             leg["peak_profit_pct"] = round((price - leg["entry"]) / leg["entry"] * 100, 2)
+            self._no_new_high_count = 0  # reset on new high
+        else:
+            self._no_new_high_count += 1
 
         if not leg["phase2"] and price > leg["entry"]:
             leg["phase2"] = True
@@ -378,15 +389,37 @@ class BuyExitStrategy:
 
         reason = None
 
-        if price <= leg["sl"]:
+        # Track profit history for decay detection
+        self._profit_history.append(current_pct)
+        if len(self._profit_history) > 30:
+            self._profit_history = self._profit_history[-30:]
+
+        # ── 10-Signal AI Exit Analyzer ──────────────────────────────────
+        # Runs all advanced exit signals: volatility spike, reversal patterns,
+        # momentum collapse, profit decay, gamma trap, cascade risk, etc.
+        ai_exit, ai_exit_reason = self._exit_analyzer.check(
+            prices=list(self._opt_price_hist),
+            entry=leg["entry"],
+            side=leg["side"],
+            current_pct=current_pct,
+            peak_pct=peak_pct,
+            held_secs=elapsed,
+            profit_history=self._profit_history,
+            opt_price=price,
+        )
+        if ai_exit:
+            reason = "ai_analyzer"
+            leg["_ai_exit_detail"] = ai_exit_reason
+
+        # ── Core exit checks (SL, trail, timeout) ──────────────────────
+        if reason is None and price <= leg["sl"]:
             reason = "sl"
-        elif leg["phase2"] and leg["trail_price"] and price <= leg["trail_price"]:
+        elif reason is None and leg["phase2"] and leg["trail_price"] and price <= leg["trail_price"]:
             reason = "trail"
-        elif elapsed >= timeout_secs:
+        elif reason is None and elapsed >= timeout_secs:
             if current_pct < min_profit_pct:
                 reason = "timeout"
-        elif self._brain.check_ai_exit(current_pct, momentum_score):
-            # AI exit: profit decaying every tick + momentum collapsed
+        elif reason is None and self._brain.check_ai_exit(current_pct, momentum_score):
             reason = "ai_exit"
 
         if reason:
@@ -444,8 +477,9 @@ class BuyExitStrategy:
         except Exception as e:
             print(f"[XL] write error: {e}")
 
-        # Teach the brain from this trade's outcome
+        # Teach the brains from this trade's outcome
         self._brain.on_trade_closed(result)
+        self._exit_analyzer.on_trade_closed(result)
 
         return result
 
@@ -476,6 +510,7 @@ class BuyExitStrategy:
             "move_type":            self._leg["move_type"],
             "momentum_score":       self._leg.get("momentum_score", 0.5),
             "brain":                self._brain.state,
+            "exit_analyzer":        self._exit_analyzer.state,
             "open":                 self._leg["open"],
             "held_secs":            held,
         }
@@ -487,3 +522,5 @@ class BuyExitStrategy:
         self._trail_pct_override = None
         self._partial_done       = []
         self._original_qty       = 1
+        self._no_new_high_count  = 0
+        self._profit_history     = []

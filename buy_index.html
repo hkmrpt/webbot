@@ -35,18 +35,15 @@
     <div class="ti"><span class="ti-k">SPIKE</span><span class="ti-v" id="tkMove">--</span></div>
     <div class="ti"><span class="ti-k">CONFIRM</span><span class="ti-v" id="tkConfirm" style="color:var(--cyan)">--</span></div>
     <div class="ti"><span class="ti-k">REGIME</span><span class="ti-v" id="tkRegime" style="color:var(--cyan)">--</span></div>
+    <div class="ti"><span class="ti-k">RSI</span><span class="ti-v" id="tkRsi" style="color:var(--cyan)">--</span></div>
+    <div class="ti"><span class="ti-k">RANGE</span><span class="ti-v" id="tkRangePos" style="color:var(--text2)">--</span></div>
     <div class="ti"><span class="ti-k">AI</span><span class="ti-v" id="tkAiScore" style="color:var(--purple)">--</span></div>
     <div class="ti"><span class="ti-k">TRAIL%</span><span class="ti-v" id="tkTrailPct" style="color:var(--amber)">--</span></div>
     <div class="ti"><span class="ti-k">LIVE P&amp;L</span><span class="ti-v" id="tkPL">--</span></div>
     <div class="ti"><span class="ti-k">SESSION</span><span class="ti-v" id="tkSess">--</span></div>
   </div>
   <div class="top-r">
-    <span class="mode-pill-top demo" id="topModePill">🔵 DEMO</span>
     <div class="chip">Capital: <b id="capVal">₹10,000</b></div>
-    <div class="ws-pill">
-      <div class="led" id="wsLed"></div>
-      <span id="wsLbl">Disconnected</span>
-    </div>
     <a href="/settings" class="settings-btn" title="Settings">
       <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
         <path d="M19.14 12.94c.04-.3.06-.61.06-.94s-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/>
@@ -112,6 +109,22 @@
         <button class="btn btn-go" id="toggleBtn" onclick="toggleRobot()">🎯 Start Buy Robot</button>
         <button class="btn btn-exit" id="exitBtn" onclick="manualExit()">🚨 Exit Trade Now</button>
       </div>
+
+      <!-- Adopt Open Positions Toggle -->
+      <div class="adopt-toggle-row" id="adoptRow" style="display:none">
+        <div class="adopt-left">
+          <span class="adopt-label">Manage Open Positions</span>
+          <span class="adopt-sub" id="adoptSub">Detect &amp; manage positions opened on Kite</span>
+        </div>
+        <label class="toggle-switch">
+          <input type="checkbox" id="adoptToggle" onchange="toggleAdoptPositions(this.checked)">
+          <span class="toggle-slider"></span>
+        </label>
+      </div>
+      <div class="adopt-status" id="adoptStatus" style="display:none">
+        <span class="adopt-dot" id="adoptDot"></span>
+        <span id="adoptMsg">Scanning...</span>
+      </div>
     </div>
 
     <!-- Spike Detector -->
@@ -176,16 +189,6 @@
       <div class="pnl-hero-wrap">
         <div class="pnl-total zero" id="sessionPL">₹ --</div>
         <div class="pnl-sub" id="tradeCount">0 trades · 0W / 0L</div>
-      </div>
-      <div class="day-target-row">
-        <div class="dt-info">
-          <span class="dt-k">Day Target (2.5%)</span>
-          <span class="dt-v" id="dayTargetVal">₹ --</span>
-        </div>
-        <div class="dt-track">
-          <div class="dt-fill" id="dayTargetFill" style="width:0%"></div>
-        </div>
-        <span class="dt-pct" id="dayTargetPct">0%</span>
       </div>
     </div>
 
@@ -257,6 +260,12 @@
         <div class="filter-row"><span class="filter-name">Breakeven trigger</span><span class="fval fv-ok" id="fvBreakeven">--</span></div>
         <div class="filter-row"><span class="filter-name">NIFTY reversal exit</span><span class="fval fv-ok" id="fvNiftyReversal">ON</span></div>
         <div class="filter-row"><span class="filter-name">Move velocity thr</span><span class="fval fv-ok" id="fvMoveVelocity">--</span></div>
+        <div class="filter-row"><span class="filter-name">Spike speed gate</span><span class="fval fv-ok" id="fvSpikeSpeed">ON</span></div>
+        <div class="filter-row"><span class="filter-name">Trend detection</span><span class="fval fv-ok" id="fvTrend">ON</span></div>
+        <div class="filter-row"><span class="filter-name">Option price filter</span><span class="fval fv-ok" id="fvOptPrice">--</span></div>
+        <div class="filter-row"><span class="filter-name">Breakout filter</span><span class="fval fv-ok" id="fvBreakoutFilter">ON</span></div>
+        <div class="filter-row"><span class="filter-name">RSI</span><span class="fval fv-ok" id="fvRsi">--</span></div>
+        <div class="filter-row"><span class="filter-name">Range spread</span><span class="fval fv-ok" id="fvRangeSpread">--</span></div>
       </div>
     </div>
 
@@ -305,6 +314,27 @@
       <button class="dt-btn" id="dtVline" onclick="setDrawTool('vline')" title="Vertical Line (V)">
         <svg viewBox="0 0 16 16" stroke="currentColor" stroke-width="1.8" fill="none"><line x1="8" y1="1" x2="8" y2="15"/><circle cx="8" cy="1" r="1.2" fill="currentColor"/><circle cx="8" cy="15" r="1.2" fill="currentColor"/></svg>
       </button>
+      <button class="dt-btn" id="dtRay" onclick="setDrawTool('ray')" title="Ray (Y)">
+        <svg viewBox="0 0 16 16" stroke="currentColor" stroke-width="1.8" fill="none"><line x1="2" y1="12" x2="15" y2="4"/><circle cx="2" cy="12" r="1.2" fill="currentColor"/><polygon points="14,3 15,6 12,5" fill="currentColor" stroke="none"/></svg>
+      </button>
+      <button class="dt-btn" id="dtChannel" onclick="setDrawTool('channel')" title="Parallel Channel (C)">
+        <svg viewBox="0 0 16 16" stroke="currentColor" stroke-width="1.4" fill="none"><line x1="1" y1="11" x2="15" y2="5"/><line x1="1" y1="6" x2="15" y2="0" stroke-dasharray="2,2" opacity=".5"/></svg>
+      </button>
+      <button class="dt-btn" id="dtFib" onclick="setDrawTool('fib')" title="Fibonacci Retracement (F)">
+        <svg viewBox="0 0 16 16" stroke="currentColor" stroke-width="1.2" fill="none"><line x1="1" y1="2" x2="15" y2="2"/><line x1="1" y1="5.5" x2="15" y2="5.5" stroke-dasharray="2,2"/><line x1="1" y1="8.5" x2="15" y2="8.5" stroke-dasharray="3,2"/><line x1="1" y1="11.5" x2="15" y2="11.5" stroke-dasharray="2,2"/><line x1="1" y1="14" x2="15" y2="14"/></svg>
+      </button>
+      <button class="dt-btn" id="dtArrow" onclick="setDrawTool('arrow')" title="Arrow (A)">
+        <svg viewBox="0 0 16 16" stroke="currentColor" stroke-width="1.8" fill="none"><line x1="2" y1="14" x2="13" y2="3"/><polyline points="8,3 13,3 13,8"/></svg>
+      </button>
+      <button class="dt-btn" id="dtEllipse" onclick="setDrawTool('ellipse')" title="Ellipse (E)">
+        <svg viewBox="0 0 16 16" stroke="currentColor" stroke-width="1.5" fill="none"><ellipse cx="8" cy="8" rx="6" ry="4"/></svg>
+      </button>
+      <button class="dt-btn" id="dtMeasure" onclick="setDrawTool('measure')" title="Measure (M)">
+        <svg viewBox="0 0 16 16" stroke="currentColor" stroke-width="1.4" fill="none"><line x1="2" y1="14" x2="14" y2="2"/><line x1="2" y1="14" x2="2" y2="2" stroke-dasharray="2,2"/><line x1="2" y1="2" x2="14" y2="2" stroke-dasharray="2,2"/></svg>
+      </button>
+      <button class="dt-btn" id="dtText" onclick="setDrawTool('text')" title="Text Label (X)">
+        <svg viewBox="0 0 16 16" fill="currentColor"><text x="3" y="13" font-size="12" font-weight="700" font-family="monospace">T</text></svg>
+      </button>
       <div class="dt-sep"></div>
       <div class="dt-ct-group">
         <button class="dt-ct active" id="ctypeCandle" onclick="setChartType('candle')" title="Candlestick">C</button>
@@ -313,11 +343,61 @@
         <button class="dt-ct"        id="ctypeArea"   onclick="setChartType('area')"   title="Area">A</button>
       </div>
       <div class="dt-sep"></div>
+      <button class="dt-btn dt-ind-btn" id="indPanelBtn" onclick="openIndPanel()" title="Indicators">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+          <path d="M2 12 L5 4 L8 9 L11 2 L14 7"/>
+          <circle cx="14" cy="7" r="1.5" fill="currentColor"/>
+        </svg>
+      </button>
+      <div class="dt-sep"></div>
       <button class="dt-btn dt-clr" onclick="clearDrawings()" title="Clear all drawings">
         <svg viewBox="0 0 16 16" stroke="currentColor" stroke-width="1.8" fill="none"><path d="M4 4l8 8M12 4l-8 8"/></svg>
       </button>
     </div>
+    <!-- Indicator Panel (IQ Option style) -->
+    <div class="ind-panel" id="indPanel">
+      <div class="ind-panel-hdr">
+        <span>Indicators</span>
+        <button class="ind-panel-close" onclick="openIndPanel()">&times;</button>
+      </div>
+      <div class="ind-panel-body">
+        <div class="ind-cat">
+          <div class="ind-cat-title">Trend</div>
+          <div class="ind-cat-item" onclick="addIndicator('ema')"><span class="ind-cat-dot" style="background:#00d2ff"></span> EMA</div>
+          <div class="ind-cat-item" onclick="addIndicator('sma')"><span class="ind-cat-dot" style="background:#e8b730"></span> SMA</div>
+          <div class="ind-cat-item" onclick="addIndicator('wma')"><span class="ind-cat-dot" style="background:#76ff03"></span> WMA</div>
+          <div class="ind-cat-item" onclick="addIndicator('dema')"><span class="ind-cat-dot" style="background:#ff6e40"></span> DEMA</div>
+          <div class="ind-cat-item" onclick="addIndicator('tema')"><span class="ind-cat-dot" style="background:#ea80fc"></span> TEMA</div>
+          <div class="ind-cat-item" onclick="addIndicator('psar')"><span class="ind-cat-dot" style="background:#ffeb3b"></span> Parabolic SAR</div>
+          <div class="ind-cat-item" onclick="addIndicator('ichimoku')"><span class="ind-cat-dot" style="background:#26a69a"></span> Ichimoku Cloud</div>
+        </div>
+        <div class="ind-cat">
+          <div class="ind-cat-title">Oscillators</div>
+          <div class="ind-cat-item" onclick="addIndicator('rsi')"><span class="ind-cat-dot" style="background:#e040fb"></span> RSI</div>
+          <div class="ind-cat-item" onclick="addIndicator('stoch')"><span class="ind-cat-dot" style="background:#00bcd4"></span> Stochastic</div>
+          <div class="ind-cat-item" onclick="addIndicator('macd')"><span class="ind-cat-dot" style="background:#2196f3"></span> MACD</div>
+          <div class="ind-cat-item" onclick="addIndicator('cci')"><span class="ind-cat-dot" style="background:#ff7043"></span> CCI</div>
+          <div class="ind-cat-item" onclick="addIndicator('williams')"><span class="ind-cat-dot" style="background:#ab47bc"></span> Williams %R</div>
+          <div class="ind-cat-item" onclick="addIndicator('mfi')"><span class="ind-cat-dot" style="background:#66bb6a"></span> MFI</div>
+        </div>
+        <div class="ind-cat">
+          <div class="ind-cat-title">Volatility</div>
+          <div class="ind-cat-item" onclick="addIndicator('bb')"><span class="ind-cat-dot" style="background:#8c64dc"></span> Bollinger Bands</div>
+          <div class="ind-cat-item" onclick="addIndicator('atr')"><span class="ind-cat-dot" style="background:#ff9800"></span> ATR</div>
+          <div class="ind-cat-item" onclick="addIndicator('kc')"><span class="ind-cat-dot" style="background:#4dd0e1"></span> Keltner Channel</div>
+          <div class="ind-cat-item" onclick="addIndicator('dc')"><span class="ind-cat-dot" style="background:#8d6e63"></span> Donchian Channel</div>
+        </div>
+        <div class="ind-cat">
+          <div class="ind-cat-title">Volume</div>
+          <div class="ind-cat-item" onclick="addIndicator('vol')"><span class="ind-cat-dot" style="background:#4caf50"></span> Volume</div>
+          <div class="ind-cat-item" onclick="addIndicator('vwap')"><span class="ind-cat-dot" style="background:#ffffff"></span> VWAP</div>
+          <div class="ind-cat-item" onclick="addIndicator('obv')"><span class="ind-cat-dot" style="background:#42a5f5"></span> OBV</div>
+          <div class="ind-cat-item" onclick="addIndicator('cmf')"><span class="ind-cat-dot" style="background:#26c6da"></span> CMF</div>
+        </div>
+      </div>
+    </div>
     <div class="chart-wrap" id="chartWrap">
+      <div class="ind-pills" id="indPills"></div>
       <canvas id="cv"></canvas>
       <div class="x-tip"    id="xTip"></div>
       <div class="price-tag" id="priceTag"></div>
@@ -331,95 +411,122 @@
   <!-- ── RIGHT PANEL ───────────────────────────────────────────── -->
   <div class="right-panel">
 
-    <!-- Active Trade -->
-    <div class="rp-trade-sec">
-      <div class="rp-hdr">
-        <span class="lp-lbl" style="margin-bottom:0">Active Trade</span>
-        <div class="live-pnl-hero" id="livePnlHero">--</div>
-      </div>
+    <!-- Tab Navigation -->
+    <div class="rp-tab-nav">
+      <button class="rp-tab-btn active" id="rpTabTrade" onclick="switchRpPanel('trade')">Trade</button>
+      <button class="rp-tab-btn" id="rpTabPositions" onclick="switchRpPanel('positions')" style="display:none">Positions</button>
+      <button class="rp-tab-btn" id="rpTabOrders" onclick="switchRpPanel('orders')" style="display:none">Orders</button>
+      <button class="rp-tab-btn" id="rpTabActivity" onclick="switchRpPanel('activity')">Log</button>
+    </div>
 
-      <div class="trade-card" id="tradeCard">
-        <div class="tc-hdr">
-          <span class="tc-side none" id="tcSide">No trade</span>
-          <span class="tc-badge wait" id="tcBadge">Waiting</span>
+    <!-- TRADE TAB (active trade + session stats) -->
+    <div class="rp-panel-content" id="rpPanelTrade">
+      <div class="rp-trade-sec">
+        <div class="rp-hdr">
+          <span class="lp-lbl" style="margin-bottom:0">Active Trade</span>
+          <div class="live-pnl-hero" id="livePnlHero">--</div>
         </div>
-
-        <!-- Timer row -->
-        <div class="tc-timer-row" id="tcTimerRow" style="display:none">
-          <span class="tt-k">Held</span>
-          <span class="lv c" id="tcHeld">--</span>
-          <div class="tc-timer-bar">
-            <div class="tc-timer-fill" id="tcTimerFill" style="width:0%"></div>
+        <div class="trade-card" id="tradeCard">
+          <div class="tc-hdr">
+            <span class="tc-side none" id="tcSide">No trade</span>
+            <span class="tc-badge wait" id="tcBadge">Waiting</span>
           </div>
+          <div class="tc-timer-row" id="tcTimerRow" style="display:none">
+            <span class="tt-k">Held</span>
+            <span class="lv c" id="tcHeld">--</span>
+            <div class="tc-timer-bar"><div class="tc-timer-fill" id="tcTimerFill" style="width:0%"></div></div>
+          </div>
+          <div class="lr"><span class="lk">Buy Price</span><span class="lv b" id="tcEntry">--</span></div>
+          <div class="lr"><span class="lk">Current</span><span class="lv" id="tcCurrent">--</span></div>
+          <div class="lr"><span class="lk">Stop Loss <span class="lk-sub" id="tcSlPct">(10%)</span></span><span class="lv r" id="tcSL">--</span></div>
+          <div class="lr target-row" id="tcTargetRow" style="display:none">
+            <span class="lk">Target <span class="lk-sub">(+2.5%)</span></span>
+            <span class="lv g" id="tcTargetPrice">--</span>
+          </div>
+          <div class="lr" id="tcTrailRow" style="display:none">
+            <span class="lk">Trail <span class="lk-sub" id="tcTrPct">(8%)</span></span>
+            <span class="lv y" id="tcTrail">--</span>
+          </div>
+          <div class="lr" id="tcAtrRow" style="display:none"><span class="lk">ATR Trail</span><span class="lv y" id="tcAtrTrail">--</span></div>
+          <div class="profit-trail-row" id="tcProfitTrailRow"><span class="pt-k">Profit Trail</span><span class="pt-v" id="tcProfitTrail">--</span></div>
+          <div class="ratchet-row" id="tcRatchetRow"><span class="ra-k">Min Trail</span><span class="ra-v" id="tcMinTrail">--</span></div>
+          <div class="lr" id="tcBreakevenRow" style="display:none"><span class="lk">Breakeven</span><span class="lv g" id="tcBreakeven">--</span></div>
+          <div class="lr" id="tcMoveTypeRow" style="display:none"><span class="lk">Move Type</span><span class="lv" id="tcMoveType">--</span></div>
+          <div class="lr" id="tcMomentumRow" style="display:none"><span class="lk">Momentum</span><span class="lv" id="tcMomentum">--</span></div>
+          <div class="lr" id="tcPeakRow" style="display:none"><span class="lk">Peak Price</span><span class="lv g" id="tcPeak">--</span></div>
+          <div class="lr" id="tcPeakPctRow" style="display:none"><span class="lk">Peak %</span><span class="lv g" id="tcPeakPct">--</span></div>
+          <div class="lr" id="tcProfRow" style="display:none"><span class="lk">Peak P&amp;L</span><span class="lv g" id="tcPeakP">--</span></div>
+          <div class="lr"><span class="lk">Qty</span><span class="lv" id="tcQty">--</span></div>
+          <div class="lr"><span class="lk">Live P&amp;L</span><span class="lv" id="tcLivePL">--</span></div>
         </div>
-
-        <div class="lr"><span class="lk">Buy Price</span><span class="lv b" id="tcEntry">--</span></div>
-        <div class="lr"><span class="lk">Current</span><span class="lv" id="tcCurrent">--</span></div>
-        <div class="lr">
-          <span class="lk">Stop Loss <span class="lk-sub" id="tcSlPct">(15%)</span></span>
-          <span class="lv r" id="tcSL">--</span>
+        <div class="oid-row" id="orderIdRow">
+          <div class="oid-lbl">Order IDs</div>
+          <div class="oid-b" id="oidBuy">—</div>
+          <div class="oid-tgt" id="oidTarget">—</div>
+          <div class="oid-s" id="oidSell">—</div>
         </div>
-        <!-- Target limit sell order row -->
-        <div class="lr target-row" id="tcTargetRow" style="display:none">
-          <span class="lk">🎯 Target Sell <span class="lk-sub">(+2.5%)</span></span>
-          <span class="lv g" id="tcTargetPrice">--</span>
-        </div>
-        <div class="lr" id="tcTrailRow" style="display:none">
-          <span class="lk">Trail Price <span class="lk-sub" id="tcTrPct">(25%)</span></span>
-          <span class="lv y" id="tcTrail">--</span>
-        </div>
-        <div class="lr" id="tcAtrRow" style="display:none">
-          <span class="lk">ATR Trail %</span>
-          <span class="lv y" id="tcAtrTrail">--</span>
-        </div>
-        <div class="profit-trail-row" id="tcProfitTrailRow">
-          <span class="pt-k">🔒 Profit Trail</span>
-          <span class="pt-v" id="tcProfitTrail">--</span>
-        </div>
-        <div class="ratchet-row" id="tcRatchetRow">
-          <span class="ra-k">↘ Min Trail Reached</span>
-          <span class="ra-v" id="tcMinTrail">--</span>
-        </div>
-        <div class="lr" id="tcBreakevenRow" style="display:none">
-          <span class="lk">Breakeven</span>
-          <span class="lv g" id="tcBreakeven">--</span>
-        </div>
-        <div class="lr" id="tcMoveTypeRow" style="display:none">
-          <span class="lk">Move Type</span>
-          <span class="lv" id="tcMoveType">--</span>
-        </div>
-        <div class="lr" id="tcMomentumRow" style="display:none">
-          <span class="lk">Momentum</span>
-          <span class="lv" id="tcMomentum">--</span>
-        </div>
-        <div class="lr" id="tcPeakRow"    style="display:none"><span class="lk">Peak Price</span><span class="lv g" id="tcPeak">--</span></div>
-        <div class="lr" id="tcPeakPctRow" style="display:none"><span class="lk">Peak Profit %</span><span class="lv g" id="tcPeakPct">--</span></div>
-        <div class="lr" id="tcProfRow"    style="display:none"><span class="lk">Peak Profit ₹</span><span class="lv g" id="tcPeakP">--</span></div>
-        <div class="lr"><span class="lk">Qty</span><span class="lv" id="tcQty">--</span></div>
-        <div class="lr"><span class="lk">Live P&amp;L</span><span class="lv" id="tcLivePL">--</span></div>
       </div>
 
-      <div class="oid-row" id="orderIdRow">
-        <div class="oid-lbl">📋 Order IDs</div>
-        <div class="oid-b" id="oidBuy">—</div>
-        <div class="oid-tgt" id="oidTarget">—</div>
-        <div class="oid-s" id="oidSell">—</div>
-      </div>
-    </div><!-- /rp-trade-sec -->
-
-    <!-- Activity / History tabs -->
-    <div class="rp-log-sec">
-      <div class="log-hdr">
-        <div class="rp-tabs">
-          <button class="rp-tab active" id="tabActivity" onclick="switchRpTab('activity')">Activity</button>
-          <button class="rp-tab" id="tabHistory" onclick="switchRpTab('history')">History</button>
+      <!-- Session Stats -->
+      <div class="rp-session-stats">
+        <div class="rp-stat-row">
+          <span class="rp-stat-k">Session P&amp;L</span>
+          <span class="rp-stat-v" id="rpSessPnl">--</span>
         </div>
-        <button class="log-clr" id="logClrBtn" onclick="clearLogs()">clear</button>
+        <div class="rp-stat-row">
+          <span class="rp-stat-k">Trades</span>
+          <span class="rp-stat-v" id="rpSessTrades">0W / 0L</span>
+        </div>
+        <div class="rp-stat-row">
+          <span class="rp-stat-k">Budget</span>
+          <span class="rp-stat-v" id="rpBudget">--</span>
+        </div>
+        <div class="rp-stat-row">
+          <span class="rp-stat-k">Intelligence</span>
+          <span class="rp-stat-v" id="rpIntel">--</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- POSITIONS TAB -->
+    <div class="rp-panel-content" id="rpPanelPositions" style="display:none">
+      <div class="rp-panel-hdr">
+        <span>Open Positions</span>
+        <button class="rp-refresh-btn" onclick="loadOrderBook()">Refresh</button>
+      </div>
+      <div class="rp-pos-summary" id="rpPosSummary">
+        <span class="rp-pos-count" id="rpPosCount">0 open</span>
+        <span class="rp-pos-pnl" id="rpPosPnl">P&amp;L: --</span>
+      </div>
+      <div class="rp-pos-list" id="rpPosList">
+        <div class="rp-empty">No positions — start trading</div>
+      </div>
+    </div>
+
+    <!-- ORDERS TAB -->
+    <div class="rp-panel-content" id="rpPanelOrders" style="display:none">
+      <div class="rp-panel-hdr">
+        <span>Order Book</span>
+        <button class="rp-refresh-btn" onclick="loadOrderBook()">Refresh</button>
+      </div>
+      <div class="rp-order-tabs">
+        <button class="rp-otab active" id="otabAll" onclick="filterOrders('all')">All</button>
+        <button class="rp-otab" id="otabOpen" onclick="filterOrders('open')">Open</button>
+        <button class="rp-otab" id="otabDone" onclick="filterOrders('done')">Executed</button>
+        <button class="rp-otab" id="otabRej" onclick="filterOrders('rejected')">Rejected</button>
+      </div>
+      <div class="rp-order-list" id="rpOrderList">
+        <div class="rp-empty">No orders today</div>
+      </div>
+    </div>
+
+    <!-- ACTIVITY/LOG TAB -->
+    <div class="rp-panel-content" id="rpPanelActivity" style="display:none">
+      <div class="rp-panel-hdr">
+        <span>Activity Log</span>
+        <button class="rp-refresh-btn" id="logClrBtn" onclick="clearLogs()">Clear</button>
       </div>
       <div class="log-scroll" id="logBody"></div>
-      <div class="log-scroll" id="historyBody" style="display:none">
-        <div class="hist-empty">Click History tab to load trades</div>
-      </div>
     </div>
 
   </div><!-- /right-panel -->

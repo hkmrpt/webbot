@@ -29,7 +29,7 @@ BANKNIFTY_TOKEN = 260105           # BANKNIFTY index token
 # ── Position Sizing ───────────────────────────────────────────
 LOT_SIZE            = 65
 CAPITAL             = 10_000.0
-MAX_RISK_PER_TRADE  = 0.01
+MAX_RISK_PER_TRADE  = 0.02         # risk 2% of capital per trade (ATR-based sizing)
 
 # Max-capital position sizing
 # Bot buys as many lots as capital allows: lots = floor(capital / (option_price × LOT_SIZE))
@@ -45,7 +45,7 @@ AUTO_JUMP           = True         # True = ATR-based | False = fixed JUMP_PCT
 JUMP_ATR_WINDOW     = 30           # rolling tick window for live ATR (fallback only)
 JUMP_ATR_MULTIPLIER = 1.2          # ATR × this = spike threshold (live fallback)
 JUMP_MIN_PTS        = 2.0          # absolute minimum spike threshold (pts)
-JUMP_MAX_PTS        = 60.0         # absolute maximum spike threshold (pts)
+JUMP_MAX_PTS        = 20.0         # max spike threshold (tick-to-tick moves, not daily range)
 
 # ── Historical ATR-based spike threshold (primary method) ─────
 # Uses last HIST_ATR_DAYS daily candles to measure typical intraday range.
@@ -95,9 +95,9 @@ MOMENTUM_MIN        = 14           # 14/20 ticks directional = very strong momen
 
 # ── Stop Loss ─────────────────────────────────────────────────
 BUY_SL_PCT          = 5.0          # initial SL (fallback)
-SL_PHASE1_PCT       = 12.0         # was 15.0
-SL_PHASE1_SECS      = 30           # give trade 30s to develop before phase-2 tightening
-SL_PHASE2_PCT       = 6.0          # was 8.0
+SL_PHASE1_PCT       = 10.0         # initial SL — generous enough for entry noise
+SL_PHASE1_SECS      = 20           # tighten faster — 20s is enough for the move to show
+SL_PHASE2_PCT       = 4.0          # tight phase-2 — protect capital aggressively
 
 # ── NIFTY Reversal Exit ───────────────────────────────────────
 NIFTY_REVERSAL_EXIT = True
@@ -112,33 +112,35 @@ NIFTY_REVERSAL_PROFIT_SKIP_PCT = 2.0  # skip reversal exit once trade is 2%+ in 
 OPTION_ATR_PERIOD   = 10
 TRAIL_ATR_HIGH      = 5.0
 TRAIL_ATR_LOW       = 2.0
-TRAIL_PCT_HIGH      = 22.0         # was 35 — tighter ceiling protects gains
-TRAIL_PCT_LOW       = 8.0          # raised from 6% — 6% trail gets stopped by bid/ask spread noise
-BUY_TRAIL_PCT       = 12.0         # was 25 — default trail tightened
+TRAIL_PCT_HIGH      = 18.0         # cap trail — don't let it get too wide
+TRAIL_PCT_LOW       = 5.0          # tight floor — protect gains faster
+BUY_TRAIL_PCT       = 8.0          # tighter default trail
 
 # ── Profit-Tier Trail ─────────────────────────────────────────
-PROFIT_TRAIL_THRESHOLD_PCT = 3.0      # was 5.0 — tighter trail activates sooner
+PROFIT_TRAIL_THRESHOLD_PCT = 2.0   # activate profit-tier trail earlier
 
 PROFIT_TIER_TRAIL = [
-    (3.0,   5.0),   # peak ≥ 3%  → trail 5%  (was 3% — too tight, exits on spread noise)
-    (6.0,   4.5),   # peak ≥ 6%  → trail 4.5%
-    (12.0,  7.0),   # peak ≥ 12% → trail 7%  (was 10%→6%)
-    (20.0, 10.0),   # peak ≥ 20% → trail 10%
-    (35.0, 14.0),   # peak ≥ 35% → trail 14%
+    (2.0,   3.5),   # peak ≥ 2%  → trail 3.5% — lock small gains early
+    (4.0,   3.0),   # peak ≥ 4%  → trail 3.0% — tighten as profit grows
+    (8.0,   4.0),   # peak ≥ 8%  → trail 4.0% — give room for continuation
+    (15.0,  5.5),   # peak ≥ 15% → trail 5.5% — wide trail for runners
+    (25.0,  7.0),   # peak ≥ 25% → trail 7.0% — very wide for big moves
+    (40.0, 10.0),   # peak ≥ 40% → trail 10%  — max room for monster moves
 ]
 
 # ── Profit-Lock SL tiers ──────────────────────────────────────
 PROFIT_LOCK_TIERS = [
-    (10.0,  3.0),   # peak ≥ 10% → SL at entry + 3%
-    (20.0,  8.0),   # peak ≥ 20% → SL at entry + 8%
-    (30.0, 15.0),   # peak ≥ 30% → SL at entry + 15%
+    (5.0,   1.0),   # peak ≥ 5%  → SL at entry + 1% (guaranteed small win)
+    (10.0,  4.0),   # peak ≥ 10% → SL at entry + 4%
+    (20.0, 10.0),   # peak ≥ 20% → SL at entry + 10%
+    (35.0, 20.0),   # peak ≥ 35% → SL at entry + 20%
 ]
 
 # ── Trail ratchet ─────────────────────────────────────────────
 TRAIL_RATCHET_ENABLED = True          # was False — ratchet locks in tighter trail as profit grows
 
 # ── Breakeven ─────────────────────────────────────────────────
-BREAKEVEN_TRIGGER_PCT     = 3.0
+BREAKEVEN_TRIGGER_PCT     = 2.0    # move SL to breakeven earlier — protect capital
 
 # ── Time-based trail tightening ───────────────────────────────
 TRAIL_TIME_START_PCT      = 10.0   # was 15.0
@@ -153,14 +155,14 @@ FAST_MOVE_VELOCITY     = 2.0       # avg pts/tick — above = fast move
 SLOW_MOVE_TRAIL_CAP    = 5.0       # trail cap on slow moves
 FAST_MOVE_TRAIL_FLOOR  = 12.0      # trail floor on fast moves
 
-SLOW_MOVE_TIMEOUT_SECS = 45
-SLOW_MOVE_MIN_PROFIT   = 1.0
-FAST_MOVE_TIMEOUT_SECS = 120
-FAST_MOVE_MIN_PROFIT   = 3.0
+SLOW_MOVE_TIMEOUT_SECS = 40        # exit slow moves faster
+SLOW_MOVE_MIN_PROFIT   = 0.5       # lower bar — even small profit is ok for slow moves
+FAST_MOVE_TIMEOUT_SECS = 90        # fast moves get more time but not too much
+FAST_MOVE_MIN_PROFIT   = 2.0       # expect at least 2% from fast moves
 
 # ── Timeout ───────────────────────────────────────────────────
-TRADE_TIMEOUT_SECS        = 60
-TRADE_TIMEOUT_MIN_PROFIT  = 1.0    # % — exit if profit below this after timeout
+TRADE_TIMEOUT_SECS        = 50     # general timeout reduced
+TRADE_TIMEOUT_MIN_PROFIT  = 0.5    # exit if barely profitable after timeout
 
 # ── Consolidation Range Detection ─────────────────────────────
 RANGE_WINDOW     = 20              # ticks for range detection
@@ -170,10 +172,10 @@ RANGE_MAX_POINTS = 50.0            # max range width in points
 # ── Trade Controls ────────────────────────────────────────────
 SL_COOLDOWN_SECS    = 300          # 5-min cooldown after SL hit
 BUY_QTY             = 1
-MAX_TRADES_DAY      = 5            # max 5 trades/day — quality over quantity
+MAX_TRADES_DAY      = 15           # allow more trades when signals are good
 MAX_DAILY_LOSS      = 300.0        # 3% of ₹10k — one SL at 12% on ₹20 option = ₹156
-DAILY_PROFIT_TARGET = 250.0        # fallback fixed (overridden by DAILY_PROFIT_PCT)
-DAILY_PROFIT_PCT    = 0.025        # 2.5% of day-start capital — dynamic target
+DAILY_PROFIT_TARGET = 0            # 0 = no daily profit cap (run all day)
+DAILY_PROFIT_PCT    = 0.0          # 0 = disabled — no daily profit limit
 
 # ── Regression / Momentum ─────────────────────────────────────
 REGRESSION_WINDOW    = 20
@@ -227,10 +229,35 @@ PARTIAL_BOOKING_TARGETS = [
 
 # ── Smart Cooldown (reason-aware, replaces flat SL_COOLDOWN_SECS) ─────────────
 SMART_COOLDOWN_ENABLED    = True
-COOLDOWN_AFTER_SL         = 180    # SL hit — max caution (was flat 180s)
-COOLDOWN_AFTER_TRAIL_WIN  = 30     # Profitable trail exit — trend may continue
-COOLDOWN_AFTER_TRAIL_LOSS = 90     # Unprofitable trail — moderate caution
-COOLDOWN_AFTER_TIMEOUT_WIN  = 10   # Timeout but in profit — quick reset
-COOLDOWN_AFTER_TIMEOUT_LOSS = 60   # Timeout loss — investigate before re-entry
+COOLDOWN_AFTER_SL         = 120    # reduced from 180 — don't miss opportunities
+COOLDOWN_AFTER_TRAIL_WIN  = 15     # quick re-entry after winning trail — momentum may continue
+COOLDOWN_AFTER_TRAIL_LOSS = 60     # moderate caution after losing trail
+COOLDOWN_AFTER_TIMEOUT_WIN  = 5    # almost instant re-entry after profitable timeout
+COOLDOWN_AFTER_TIMEOUT_LOSS = 45   # moderate cooldown after losing timeout
 COOLDOWN_AFTER_AI_EXIT    = 45     # AI-triggered exit — moderate caution
 COOLDOWN_AFTER_REVERSAL   = 60     # NIFTY reversal exit — wait for re-establishment
+
+# ── Advanced Risk Management (v9) ─────────────────────────────────────────────
+# Consecutive loss protection — reduce position size after losses
+LOSS_STREAK_REDUCE_AFTER  = 2      # after 2 consecutive losses, reduce lot size
+LOSS_STREAK_SIZE_MULT     = 0.5    # multiply lots by 0.5 after streak (halve position)
+LOSS_STREAK_MAX_REDUCE    = 3      # max reductions before stopping for the day
+
+# Max drawdown — stop trading if capital drops too much
+MAX_DRAWDOWN_PCT          = 5.0    # stop trading if down 5% from day start
+
+# ATR-based position sizing
+# lots = floor(capital × MAX_RISK_PER_TRADE / (option_ATR × LOT_SIZE))
+# This sizes the position so that 1 ATR move = MAX_RISK_PER_TRADE of capital
+ATR_POSITION_SIZING       = True   # True = ATR-based, False = max-capital
+
+# ── Intelligent Exit (v9) ────────────────────────────────────────────────────
+# Volume dry-up exit — exit when volume collapses mid-trade
+VOLUME_DRYUP_EXIT         = True
+VOLUME_DRYUP_RATIO        = 0.3    # current vol < 30% of avg → dry-up
+VOLUME_DRYUP_MIN_PROFIT   = 1.0    # only exit on dry-up if at least 1% profit
+
+# Momentum stall exit — exit when price stalls after initial move
+MOMENTUM_STALL_EXIT       = True
+MOMENTUM_STALL_TICKS      = 8      # if price doesn't make new high for 8 ticks
+MOMENTUM_STALL_MIN_PROFIT = 1.5    # only if at least 1.5% profit

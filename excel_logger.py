@@ -237,3 +237,33 @@ def write_daily_summary(session_pnl: float, day_start_capital: float,
         except Exception as exc:
             import logging
             logging.getLogger(__name__).warning(f"Excel summary failed: {exc}")
+
+
+def read_total_pnl() -> float:
+    """
+    Read trade_log.xlsx and return sum of all P&L values.
+    Skips summary rows (Trade # = '─ SUMMARY ─').
+    Returns 0.0 if file missing or unreadable.
+    """
+    if not os.path.exists(EXCEL_LOG):
+        return 0.0
+    try:
+        from openpyxl import load_workbook
+        wb = load_workbook(EXCEL_LOG, read_only=True, data_only=True)
+        ws = wb.active
+        total = 0.0
+        for row in ws.iter_rows(min_row=2, values_only=True):
+            # Skip summary rows and blank rows
+            trade_num = row[2] if len(row) > 2 else None
+            if trade_num is None or trade_num == "" or trade_num == "─ SUMMARY ─":
+                continue
+            pnl = row[8] if len(row) > 8 else None  # "P&L ₹" is column 9 (index 8)
+            if pnl is not None:
+                try:
+                    total += float(pnl)
+                except (ValueError, TypeError):
+                    pass
+        wb.close()
+        return round(total, 2)
+    except Exception:
+        return 0.0

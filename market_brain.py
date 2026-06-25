@@ -31,7 +31,7 @@ from collections import deque
 from datetime import datetime
 
 BRAIN_STATE_FILE = "brain_state.json"
-N_FEATURES       = 7
+N_FEATURES       = 9
 
 # ── Logistic helpers ──────────────────────────────────────────────────────────
 
@@ -75,8 +75,15 @@ class RunningStats:
 
     def from_dict(self, d: dict):
         self.count = d.get("count", 0)
-        self.mean  = d.get("mean",  [0.0] * self.n)
-        self._M2   = d.get("M2",    [1.0] * self.n)
+        loaded_mean = d.get("mean", [0.0] * self.n)
+        loaded_m2   = d.get("M2",   [1.0] * self.n)
+        # Extend if feature count grew
+        if len(loaded_mean) < self.n:
+            loaded_mean.extend([0.0] * (self.n - len(loaded_mean)))
+        if len(loaded_m2) < self.n:
+            loaded_m2.extend([1.0] * (self.n - len(loaded_m2)))
+        self.mean = loaded_mean[:self.n]
+        self._M2  = loaded_m2[:self.n]
 
 
 # ── Online Logistic Regression ────────────────────────────────────────────────
@@ -144,7 +151,11 @@ class OnlineLR:
         }
 
     def from_dict(self, d: dict):
-        self.weights  = d.get("weights",  [0.0] * N_FEATURES)
+        loaded = d.get("weights", [0.0] * N_FEATURES)
+        # Extend if feature count grew (new features start neutral at 0.0)
+        if len(loaded) < N_FEATURES:
+            loaded.extend([0.0] * (N_FEATURES - len(loaded)))
+        self.weights  = loaded[:N_FEATURES]
         self.bias     = d.get("bias",     0.0)
         self.n_trades = d.get("n_trades", 0)
         self.n_wins   = d.get("n_wins",   0)
@@ -233,6 +244,8 @@ class FeatureBuilder:
       4  atr_pct         NIFTY ATR / price * 100                → volatility
       5  fast_entry      1.0 if fast entry, 0.0 if confirmed
       6  regime_enc      trending=1.0, choppy=−1.0, volatile=0.5, unknown=0
+      7  rsi             RSI over last 14 ticks (0–100)          → overbought/oversold
+      8  range_position  position in session high-low (0–1)       → extremes
     """
 
     REGIME_ENC = {
@@ -255,6 +268,8 @@ class FeatureBuilder:
         nifty_atr:    float,
         fast_entry:   bool,
         regime:       str,
+        rsi:          float = 50.0,
+        range_position: float = 0.5,
     ) -> list:
         # 0 — spike strength
         spike_strength = abs(spike_pts) / jump_threshold if jump_threshold else 1.0
@@ -283,7 +298,13 @@ class FeatureBuilder:
         # 6 — regime encoding
         regime_enc = self.REGIME_ENC.get(regime, 0.0)
 
-        return [spike_strength, slope_val, velocity, time_norm, atr_pct, fast_flag, regime_enc]
+        # 7 — RSI (already 0-100 scale, normalize in pipeline)
+        rsi_val = float(rsi)
+
+        # 8 — Session range position (0 = at session low, 1 = at session high)
+        range_val = float(range_position)
+
+        return [spike_strength, slope_val, velocity, time_norm, atr_pct, fast_flag, regime_enc, rsi_val, range_val]
 
 
 # ── Market Brain (top-level API) ──────────────────────────────────────────────
@@ -340,6 +361,8 @@ class MarketBrain:
             nifty_atr      = state.get("jump_atr", 0) or 0,
             fast_entry     = state.get("fast_entry", False),
             regime         = regime,
+            rsi            = state.get("rsi", 50.0),
+            range_position = state.get("range_position", 0.5),
         )
 
         self._stats.update(raw)
@@ -396,7 +419,8 @@ class MarketBrain:
             "bias":             round(self._lr.bias, 4),
             "feature_names":    [
                 "spike_strength", "slope", "nifty_velocity",
-                "time_of_day", "atr_pct", "fast_entry", "regime"
+                "time_of_day", "atr_pct", "fast_entry", "regime",
+                "rsi", "range_position"
             ],
         }
 
