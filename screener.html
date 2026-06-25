@@ -1,0 +1,548 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Stock Screener – Option Bot</title>
+<style>
+:root{
+  --bg:#0d0f14;--card:#161a22;--border:#252b38;
+  --green:#00c48c;--red:#ff4d6d;--blue:#4ea8ff;
+  --amber:#ffb347;--purple:#b48eff;--cyan:#00d4ff;
+  --text:#d0d6e8;--sub:#6b7a99;--hover:#1e2535;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font:13px/1.5 'Segoe UI',system-ui,sans-serif}
+
+/* ── Header ── */
+header{display:flex;align-items:center;gap:12px;padding:10px 18px;
+  background:var(--card);border-bottom:1px solid var(--border)}
+header h1{font-size:15px;font-weight:700;flex:1}
+header a{color:var(--sub);text-decoration:none;font-size:12px;padding:4px 8px;
+  border-radius:4px;border:1px solid var(--border)}
+header a:hover{color:var(--blue);border-color:var(--blue)}
+
+/* ── Toolbar ── */
+.toolbar{display:flex;gap:10px;align-items:center;padding:10px 18px;
+  background:var(--card);border-bottom:1px solid var(--border);flex-wrap:wrap}
+.toolbar label{font-size:11px;color:var(--sub);display:flex;align-items:center;gap:5px}
+.toolbar select,.toolbar input[type=number]{
+  background:var(--bg);color:var(--text);border:1px solid var(--border);
+  border-radius:4px;padding:4px 8px;font-size:12px}
+.btn{padding:6px 14px;border-radius:5px;font-size:12px;font-weight:600;
+  cursor:pointer;border:none;transition:opacity .15s}
+.btn:hover{opacity:.85}.btn:disabled{opacity:.4;cursor:not-allowed}
+.btn-blue{background:var(--blue);color:#000}
+.btn-green{background:var(--green);color:#000}
+.btn-red{background:var(--red);color:#fff}
+.btn-amber{background:var(--amber);color:#000}
+.btn-ghost{background:none;border:1px solid var(--border);color:var(--sub)}
+.btn-ghost:hover{border-color:var(--blue);color:var(--blue)}
+
+#status-bar{padding:5px 18px;font-size:11px;color:var(--sub);
+  background:var(--card);border-bottom:1px solid var(--border)}
+
+/* ── Layout ── */
+.two-col{display:flex;height:calc(100vh - 112px);overflow:hidden}
+#left{flex:1 1 65%;overflow-y:auto;padding:14px;border-right:1px solid var(--border)}
+#right{flex:0 0 36%;overflow-y:auto;padding:14px;min-width:280px}
+
+.section-hd{font-size:11px;font-weight:700;color:var(--sub);text-transform:uppercase;
+  letter-spacing:.06em;margin-bottom:10px}
+
+/* ── Stock cards ── */
+.stock-card{background:var(--card);border:1px solid var(--border);
+  border-radius:8px;margin-bottom:10px;overflow:hidden}
+.card-head{display:flex;align-items:center;gap:10px;padding:10px 12px;
+  cursor:pointer;user-select:none}
+.card-head:hover{background:var(--hover)}
+.rank{width:24px;text-align:center;font-size:11px;color:var(--sub);font-weight:700}
+.sym{font-size:15px;font-weight:700;flex:1}
+.price{font-size:14px;font-weight:700;color:var(--blue)}
+.composite{font-size:18px;font-weight:800;min-width:42px;text-align:right}
+.dir-badge{padding:2px 8px;border-radius:4px;font-size:11px;font-weight:700;min-width:38px;text-align:center}
+.dir-ce{background:rgba(0,196,140,.15);color:var(--green);border:1px solid rgba(0,196,140,.3)}
+.dir-pe{background:rgba(255,77,109,.15);color:var(--red);  border:1px solid rgba(255,77,109,.3)}
+.dir-both{background:rgba(255,179,71,.12);color:var(--amber);border:1px solid rgba(255,179,71,.3)}
+.vote-bar{font-size:10px;color:var(--sub)}
+
+.card-body{padding:0 12px 12px;display:none}
+.card-body.open{display:block}
+
+/* signals */
+.signals{display:flex;flex-wrap:wrap;gap:5px;margin-bottom:10px}
+.sig{padding:2px 7px;border-radius:3px;font-size:10px;font-weight:600;cursor:default}
+.sig-ce  {background:rgba(0,196,140,.12);color:var(--green);border:1px solid rgba(0,196,140,.25)}
+.sig-pe  {background:rgba(255,77,109,.12);color:var(--red);  border:1px solid rgba(255,77,109,.25)}
+.sig-both{background:rgba(78,168,255,.10);color:var(--blue);border:1px solid rgba(78,168,255,.25)}
+
+/* score bars */
+.score-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:6px;margin-bottom:10px}
+.score-item{background:var(--bg);border-radius:5px;padding:5px 7px}
+.score-label{font-size:9px;color:var(--sub);text-transform:uppercase;margin-bottom:2px}
+.score-val{font-size:12px;font-weight:700;margin-bottom:3px}
+.bar{height:4px;background:var(--border);border-radius:2px}
+.bar-fill{height:4px;border-radius:2px;transition:width .4s}
+
+/* reasons */
+.reasons{margin-bottom:10px}
+.reason-item{display:flex;align-items:flex-start;gap:7px;padding:5px 8px;
+  margin-bottom:4px;background:var(--bg);border-radius:5px;font-size:11px;line-height:1.4}
+.reason-icon{font-size:13px;flex-shrink:0;margin-top:1px}
+
+/* strike selector */
+.strike-section{border-top:1px solid var(--border);padding-top:10px;margin-top:4px}
+.strike-hd{font-size:11px;font-weight:600;color:var(--sub);margin-bottom:7px;
+  display:flex;justify-content:space-between;align-items:center}
+.strike-table{width:100%;font-size:11px;border-collapse:collapse}
+.strike-table th{color:var(--sub);text-align:left;padding:3px 6px;font-weight:600}
+.strike-table td{padding:3px 6px;border-bottom:1px solid rgba(37,43,56,.7)}
+.strike-table tr.atm-row td{background:rgba(78,168,255,.06);font-weight:700}
+.btn-mini{padding:2px 8px;border-radius:3px;font-size:10px;font-weight:700;
+  cursor:pointer;border:none;margin:1px}
+.btn-ce-mini{background:rgba(0,196,140,.2);color:var(--green)}
+.btn-ce-mini:hover{background:rgba(0,196,140,.4)}
+.btn-pe-mini{background:rgba(255,77,109,.2);color:var(--red)}
+.btn-pe-mini:hover{background:rgba(255,77,109,.4)}
+.btn-both-mini{background:rgba(78,168,255,.2);color:var(--blue)}
+.btn-both-mini:hover{background:rgba(78,168,255,.4)}
+.moneyness{font-size:9px;color:var(--sub)}
+
+/* ── Right panel ── */
+.manual-box{background:var(--card);border:1px solid var(--border);
+  border-radius:8px;padding:12px;margin-bottom:12px}
+.manual-box h3{font-size:12px;color:var(--sub);margin-bottom:8px}
+.resolve-row{display:flex;gap:6px;margin-bottom:6px}
+.resolve-row input{flex:1;background:var(--bg);color:var(--text);
+  border:1px solid var(--border);border-radius:4px;padding:5px 8px;font-size:12px}
+.resolve-row input::placeholder{color:var(--sub)}
+#resolve-result{background:var(--bg);border-radius:6px;padding:10px;
+  margin-bottom:8px;font-size:11px;display:none}
+
+/* tracked stocks */
+.tracked-card{background:var(--card);border:1px solid var(--border);
+  border-radius:8px;padding:10px;margin-bottom:8px}
+.tc-head{display:flex;align-items:center;gap:8px;margin-bottom:7px}
+.tc-sym{font-weight:700;font-size:14px;flex:1}
+.tc-price{color:var(--blue);font-weight:600}
+.tc-body{display:grid;grid-template-columns:1fr 1fr;gap:2px;font-size:11px;margin-bottom:7px}
+.tc-lbl{color:var(--sub)}.tc-val{color:var(--text)}
+.tc-opts{display:flex;gap:5px}
+.opt-tag{flex:1;text-align:center;padding:3px 6px;border-radius:4px;font-size:10px;font-weight:600}
+.opt-ce{background:rgba(0,196,140,.12);color:var(--green);border:1px solid rgba(0,196,140,.3)}
+.opt-pe{background:rgba(255,77,109,.12);color:var(--red);  border:1px solid rgba(255,77,109,.3)}
+.btn-rm{background:none;border:1px solid var(--border);border-radius:4px;
+  color:var(--sub);padding:2px 7px;cursor:pointer;font-size:11px;margin-left:auto}
+.btn-rm:hover{border-color:var(--red);color:var(--red)}
+
+/* ── Spinner / toast ── */
+.spin{display:inline-block;width:13px;height:13px;border:2px solid var(--border);
+  border-top-color:var(--blue);border-radius:50%;animation:sp .7s linear infinite}
+@keyframes sp{to{transform:rotate(360deg)}}
+#spinner{display:none}.spinner-on{display:inline-block!important;margin-left:8px}
+
+#toast{position:fixed;bottom:20px;right:20px;background:var(--card);
+  border:1px solid var(--border);border-radius:6px;padding:9px 15px;
+  font-size:12px;z-index:999;opacity:0;transition:opacity .3s;max-width:300px}
+#toast.show{opacity:1}
+#toast.ok {border-color:var(--green);color:var(--green)}
+#toast.err{border-color:var(--red);  color:var(--red)}
+.empty-msg{text-align:center;color:var(--sub);padding:30px 0;font-size:13px}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>📊 Stock Screener + Multi-Stock Bot</h1>
+  <a href="/">← Dashboard</a>
+  <a href="/settings">⚙ Settings</a>
+</header>
+
+<div class="toolbar">
+  <label>Top
+    <select id="top-n">
+      <option value="10">10</option>
+      <option value="20" selected>20</option>
+      <option value="30">30</option>
+      <option value="50">50</option>
+    </select>
+  </label>
+  <label>Expiry
+    <select id="expiry-pref">
+      <option value="nearest" selected>Nearest weekly</option>
+      <option value="next">Next weekly</option>
+      <option value="monthly">Monthly</option>
+    </select>
+  </label>
+  <button class="btn btn-blue" id="run-btn" onclick="runScreener()">▶ Run Screener (10 strategies)</button>
+  <span id="spinner"><span class="spin"></span></span>
+  <span id="cache-info" style="color:var(--sub);font-size:11px"></span>
+  <div style="margin-left:auto;display:flex;gap:8px">
+    <button class="btn btn-ghost" onclick="clearAllStocks()">✕ Clear All Tracked</button>
+  </div>
+</div>
+<div id="status-bar">Ready. Click "Run Screener" — fetches 1-year chart history for each stock.</div>
+
+<div class="two-col">
+
+  <!-- ── Left: screener results ── -->
+  <div id="left">
+    <div class="section-hd">Screener Results
+      <span id="result-count" style="color:var(--blue);font-weight:800;margin-left:6px"></span>
+    </div>
+    <div id="screener-body">
+      <div class="empty-msg">Run the screener to see results.</div>
+    </div>
+  </div>
+
+  <!-- ── Right: tracked stocks + manual add ── -->
+  <div id="right">
+
+    <div class="manual-box">
+      <h3>Add Stock Manually</h3>
+      <div class="resolve-row">
+        <input id="m-symbol" placeholder="RELIANCE" style="text-transform:uppercase">
+        <input id="m-price"  placeholder="Spot ₹" type="number" step="0.05">
+        <button class="btn btn-blue" onclick="resolveAndShow()">Resolve</button>
+      </div>
+      <div id="resolve-result"></div>
+    </div>
+
+    <div class="section-hd">
+      Tracked Stocks <span id="tracked-count" style="color:var(--blue);font-weight:800;margin-left:6px">0</span>
+    </div>
+    <div id="tracked-body"><div class="empty-msg">No stocks tracked yet.</div></div>
+
+  </div>
+</div>
+<div id="toast"></div>
+
+<script>
+// ── Helpers ───────────────────────────────────────────────────────────────────
+const $ = id => document.getElementById(id);
+const expiry = () => $('expiry-pref').value;
+
+function setStatus(msg, err=false){
+  $('status-bar').textContent = msg;
+  $('status-bar').style.color = err ? 'var(--red)' : 'var(--sub)';
+}
+function toast(msg, type='ok'){
+  const el = $('toast');
+  el.textContent = msg; el.className = 'show ' + type;
+  clearTimeout(el._t); el._t = setTimeout(()=>el.className='', 3000);
+}
+function spinOn(){ $('spinner').className = 'spinner-on'; $('run-btn').disabled = true; }
+function spinOff(){ $('spinner').className = ''; $('run-btn').disabled = false; }
+
+function scoreColor(v){
+  if(v >= 70) return 'var(--green)';
+  if(v >= 40) return 'var(--amber)';
+  return 'var(--red)';
+}
+function barColor(v){
+  if(v >= 70) return '#00c48c';
+  if(v >= 40) return '#ffb347';
+  return '#4ea8ff';
+}
+
+// ── Screener ──────────────────────────────────────────────────────────────────
+let _screenData = [];
+
+async function runScreener(){
+  spinOn();
+  const topN = $('top-n').value;
+  setStatus('Running screener — fetching 1-year chart history for each F&O stock…');
+  try{
+    const res  = await fetch(`/api/screen_stocks?top_n=${topN}&force=1`);
+    const data = await res.json();
+    if(data.error){ setStatus('Error: '+data.error, true); return; }
+    _screenData = data;
+    renderScreener(data);
+    setStatus(`Screened ${data.length} stocks using 10 strategies. Expand any row to see chart analysis.`);
+    $('result-count').textContent = data.length;
+    await refreshCacheAge();
+  }catch(e){ setStatus('Fetch error: '+e, true); }
+  finally{ spinOff(); }
+}
+
+function renderScreener(stocks){
+  const body = $('screener-body');
+  if(!stocks.length){ body.innerHTML='<div class="empty-msg">No results.</div>'; return; }
+  body.innerHTML = stocks.map((s,i) => stockCard(s, i+1)).join('');
+}
+
+function stockCard(s, rank){
+  const dirClass  = s.direction==='CE' ? 'dir-ce' : s.direction==='PE' ? 'dir-pe' : 'dir-both';
+  const scorColor = scoreColor(s.composite_score);
+  const ce_v = s.direction_votes?.CE || 0;
+  const pe_v = s.direction_votes?.PE || 0;
+  const voteStr = `CE:${ce_v} PE:${pe_v}`;
+
+  const signalBadges = (s.signals||[]).map(sg=>{
+    const cls = sg.dir==='CE' ? 'sig-ce' : sg.dir==='PE' ? 'sig-pe' : 'sig-both';
+    return `<span class="sig ${cls}" title="${sg.dir} signal (score ${sg.score})">${sg.tag}</span>`;
+  }).join('');
+
+  const scores = s.scores || {};
+  const scoreGrid = [
+    {k:'52W Low',  v:scores['52w_low']||0,  c:'#00c48c'},
+    {k:'52W High', v:scores['52w_high']||0, c:'#4ea8ff'},
+    {k:'Volume',   v:scores['volume']||0,   c:'#ffb347'},
+    {k:'ATR Coil', v:scores['atr']||0,      c:'#b48eff'},
+    {k:'RSI',      v:scores['rsi']||0,      c:'#ff4d6d'},
+    {k:'Breakout', v:scores['breakout']||0, c:'#00d4ff'},
+    {k:'MA Cross', v:scores['ma_cross']||0, c:'#00c48c'},
+    {k:'MACD',     v:scores['macd']||0,     c:'#ffb347'},
+    {k:'Candle',   v:scores['candle']||0,   c:'#b48eff'},
+    {k:'BB Squeeze',v:scores['bb']||0,      c:'#4ea8ff'},
+  ].map(it=>`
+    <div class="score-item">
+      <div class="score-label">${it.k}</div>
+      <div class="score-val" style="color:${scoreColor(it.v)}">${it.v}</div>
+      <div class="bar"><div class="bar-fill" style="width:${it.v}%;background:${it.c}"></div></div>
+    </div>`).join('');
+
+  const reasons = (s.reasons||[]).map(r=>{
+    const icon = r.includes('▲')||r.includes('bullish')||r.includes('CE') ? '📈' :
+                 r.includes('▼')||r.includes('bearish')||r.includes('PE') ? '📉' : '📊';
+    return `<div class="reason-item"><span class="reason-icon">${icon}</span><span>${r}</span></div>`;
+  }).join('') || '<div style="color:var(--sub);font-size:11px;padding:4px">No strong signals triggered.</div>';
+
+  return `
+  <div class="stock-card" id="card-${rank}">
+    <div class="card-head" onclick="toggleCard(${rank})">
+      <span class="rank">#${rank}</span>
+      <div style="flex:1">
+        <div style="display:flex;align-items:center;gap:8px">
+          <span class="sym">${s.symbol}</span>
+          <span class="dir-badge ${dirClass}">${s.direction}</span>
+          <span class="vote-bar">${voteStr}</span>
+        </div>
+        <div style="font-size:11px;color:var(--sub)">${s.name||''} · ₹${s.current_price?.toLocaleString('en-IN')}</div>
+      </div>
+      <div style="text-align:right">
+        <div class="composite" style="color:${scorColor}">${s.composite_score}</div>
+        <div style="font-size:10px;color:var(--sub)">${(s.signals||[]).length} signals</div>
+      </div>
+      <span style="color:var(--sub);font-size:16px;margin-left:4px" id="chevron-${rank}">›</span>
+    </div>
+    <div class="card-body" id="body-${rank}">
+
+      <!-- Signal badges -->
+      <div class="signals">${signalBadges || '<span style="color:var(--sub);font-size:11px">No strong signals</span>'}</div>
+
+      <!-- Chart analysis reasons -->
+      <div style="font-size:11px;font-weight:700;color:var(--sub);margin-bottom:5px;text-transform:uppercase;letter-spacing:.05em">Chart Analysis (1-year history)</div>
+      <div class="reasons">${reasons}</div>
+
+      <!-- Score breakdown -->
+      <div style="font-size:11px;font-weight:700;color:var(--sub);margin-bottom:5px;text-transform:uppercase;letter-spacing:.05em">Strategy Scores</div>
+      <div class="score-grid">${scoreGrid}</div>
+
+      <!-- 52W context -->
+      <div style="font-size:11px;color:var(--sub);margin-bottom:8px">
+        52W Low: ₹${s.w52_low} (${s.pct_from_52w_low}% away) &nbsp;·&nbsp;
+        52W High: ₹${s.w52_high} (${s.pct_from_52w_high}% away) &nbsp;·&nbsp;
+        RSI: ${s.rsi} &nbsp;·&nbsp; ${s.candles} trading days
+      </div>
+
+      <!-- Strike selector -->
+      <div class="strike-section">
+        <div class="strike-hd">
+          <span>Near-ATM Strikes (auto-resolved)</span>
+          <button class="btn btn-green" style="font-size:11px;padding:3px 10px"
+            onclick="addStockQuick('${s.symbol}', ${s.current_price}, '${s.token}', ${s.lot_size})">
+            + Add ATM to Bot
+          </button>
+        </div>
+        <div id="strikes-${rank}">
+          <div style="color:var(--sub);font-size:11px">Click to load strikes…</div>
+          <button class="btn btn-ghost" style="font-size:11px;padding:3px 10px;margin-top:5px"
+            onclick="loadStrikes(${rank},'${s.symbol}',${s.current_price})">Load Strikes</button>
+        </div>
+      </div>
+    </div>
+  </div>`;
+}
+
+function toggleCard(rank){
+  const body  = $(`body-${rank}`);
+  const chev  = $(`chevron-${rank}`);
+  const open  = body.classList.toggle('open');
+  chev.textContent = open ? '˅' : '›';
+}
+
+async function loadStrikes(rank, symbol, price){
+  const div = $(`strikes-${rank}`);
+  div.innerHTML = '<span class="spin"></span>';
+  try{
+    const res  = await fetch(`/api/resolve_options?symbol=${symbol}&price=${price}&expiry=${expiry()}`);
+    const data = await res.json();
+    if(data.error){ div.innerHTML = `<span style="color:var(--red)">${data.error}</span>`; return; }
+    div.innerHTML = buildStrikeTable(data, symbol, price);
+  }catch(e){ div.innerHTML = `<span style="color:var(--red)">${e}</span>`; }
+}
+
+function buildStrikeTable(data, symbol, price){
+  const exp = data.expiry;
+  const near = data.nearby_strikes || [];
+  if(!near.length) return '<div style="color:var(--sub)">No nearby strikes found.</div>';
+
+  const rows = near.map(n => {
+    const atm = n.offset === 0;
+    const distPct = Math.abs(((n.strike - price) / price) * 100).toFixed(1);
+    const moneyness = n.offset === 0 ? 'ATM' : n.offset > 0 ? `+${n.offset} OTM` : `${n.offset} ITM`;
+    const ceBtn = n.ce_token
+      ? `<button class="btn-mini btn-ce-mini" onclick="addStrikeToBot('${symbol}','${n.ce_token}','${n.ce_symbol}',null,null,${data.lot_size},${price},'${exp}','CE')">CE only</button>`
+      : '—';
+    const peBtn = n.pe_token
+      ? `<button class="btn-mini btn-pe-mini" onclick="addStrikeToBot('${symbol}',null,null,'${n.pe_token}','${n.pe_symbol}',${data.lot_size},${price},'${exp}','PE')">PE only</button>`
+      : '—';
+    const bothBtn = (n.ce_token && n.pe_token)
+      ? `<button class="btn-mini btn-both-mini" onclick="addStrikeToBot('${symbol}','${n.ce_token}','${n.ce_symbol}','${n.pe_token}','${n.pe_symbol}',${data.lot_size},${price},'${exp}','BOTH')">Both</button>`
+      : '';
+    return `<tr ${atm ? 'class="atm-row"' : ''}>
+      <td>${n.strike} <span class="moneyness">${moneyness}</span></td>
+      <td>${distPct}%</td>
+      <td>${ceBtn}</td>
+      <td>${peBtn}</td>
+      <td>${bothBtn}</td>
+    </tr>`;
+  }).join('');
+
+  return `
+  <div style="font-size:11px;color:var(--sub);margin-bottom:5px">
+    Expiry: <b style="color:var(--text)">${exp}</b> · Lot: ${data.lot_size}
+    · Spot ₹${price}
+    · <span style="color:var(--amber)">ATM Strike: ${data.strike}</span>
+  </div>
+  <table class="strike-table">
+    <thead><tr><th>Strike</th><th>Dist</th><th>CE</th><th>PE</th><th>Both</th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table>`;
+}
+
+async function addStrikeToBot(symbol, ceTok, ceSym, peTok, peSym, lotSize, price, expiry, sides){
+  // Need the underlying NSE token — try to get from screener cache
+  const cached = _screenData.find(s => s.symbol === symbol);
+  const nseTok = cached ? parseInt(cached.token) : 0;
+  await doAddStock({
+    symbol,
+    token:    nseTok,
+    ce_token: ceTok ? parseInt(ceTok) : null,
+    pe_token: peTok ? parseInt(peTok) : null,
+    ce_symbol: ceSym, pe_symbol: peSym,
+    lot_size: parseInt(lotSize),
+    active_sides: sides === 'CE' ? ['CE'] : sides === 'PE' ? ['PE'] : ['CE','PE'],
+  });
+}
+
+async function addStockQuick(symbol, price, nseToken, lotSize){
+  setStatus(`Resolving ATM options for ${symbol}…`);
+  try{
+    const res  = await fetch(`/api/resolve_options?symbol=${symbol}&price=${price}&expiry=${expiry()}`);
+    const data = await res.json();
+    if(data.error){ toast('Resolve failed: '+data.error,'err'); return; }
+    await doAddStock({
+      symbol,
+      token:     parseInt(nseToken),
+      ce_token:  data.CE ? parseInt(data.CE.token) : null,
+      pe_token:  data.PE ? parseInt(data.PE.token) : null,
+      ce_symbol: data.CE?.symbol, pe_symbol: data.PE?.symbol,
+      lot_size:  parseInt(lotSize),
+      active_sides: ['CE','PE'],
+    });
+  }catch(e){ toast('Error: '+e,'err'); }
+}
+
+// ── Manual resolve ────────────────────────────────────────────────────────────
+async function resolveAndShow(){
+  const sym   = $('m-symbol').value.trim().toUpperCase();
+  const price = parseFloat($('m-price').value);
+  if(!sym || !price){ toast('Enter symbol and price','err'); return; }
+
+  const res  = await fetch(`/api/resolve_options?symbol=${sym}&price=${price}&expiry=${expiry()}`);
+  const data = await res.json();
+  const div  = $('resolve-result');
+  div.style.display = 'block';
+
+  if(data.error){
+    div.innerHTML = `<span style="color:var(--red)">${data.error}</span>`;
+    return;
+  }
+  div.innerHTML = buildStrikeTable(data, sym, price);
+}
+
+// ── Add / remove tracked stocks ───────────────────────────────────────────────
+async function doAddStock(payload){
+  const res  = await fetch('/api/add_stock',{
+    method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify(payload),
+  });
+  const data = await res.json();
+  if(data.ok){ toast(`${payload.symbol} added!`,'ok'); await refreshTracked(); }
+  else        { toast('Add failed: '+(data.error||'?'),'err'); }
+}
+
+async function removeStock(symbol){
+  const res = await fetch(`/api/remove_stock/${symbol}`,{method:'DELETE'});
+  const d   = await res.json();
+  if(d.ok){ toast(`${symbol} removed`,'ok'); await refreshTracked(); }
+}
+
+async function clearAllStocks(){
+  if(!confirm('Remove all tracked stocks?')) return;
+  const res = await fetch('/api/clear_stocks',{method:'POST'});
+  const d   = await res.json();
+  if(d.ok){ toast('All cleared','ok'); await refreshTracked(); }
+}
+
+async function refreshTracked(){
+  const res  = await fetch('/api/tracked_stocks');
+  const data = await res.json();
+  const stocks = Object.values(data);
+  $('tracked-count').textContent = stocks.length;
+  const body = $('tracked-body');
+  if(!stocks.length){ body.innerHTML='<div class="empty-msg">No stocks tracked yet.</div>'; return; }
+  body.innerHTML = stocks.map(s=>`
+  <div class="tracked-card">
+    <div class="tc-head">
+      <span class="tc-sym">${s.symbol}</span>
+      <span class="tc-price">${s.price ? '₹'+s.price.toLocaleString('en-IN') : '—'}</span>
+      <button class="btn-rm" onclick="removeStock('${s.symbol}')">✕</button>
+    </div>
+    <div class="tc-body">
+      <span class="tc-lbl">Jump threshold</span><span class="tc-val">${s.jump_threshold} pts</span>
+      <span class="tc-lbl">ATR</span><span class="tc-val">${s.jump_atr ?? '—'}</span>
+      <span class="tc-lbl">Lot size</span><span class="tc-val">${s.lot_size}</span>
+      <span class="tc-lbl">Sides</span><span class="tc-val">${s.active_sides.join('+')}</span>
+      <span class="tc-lbl">CE price</span><span class="tc-val">${s.ce_price ? '₹'+s.ce_price : '—'}</span>
+      <span class="tc-lbl">PE price</span><span class="tc-val">${s.pe_price ? '₹'+s.pe_price : '—'}</span>
+    </div>
+    <div class="tc-opts">
+      <span class="opt-tag opt-ce">${s.ce_symbol||'No CE'}</span>
+      <span class="opt-tag opt-pe">${s.pe_symbol||'No PE'}</span>
+    </div>
+  </div>`).join('');
+}
+
+async function refreshCacheAge(){
+  try{
+    const res = await fetch('/api/screen_cache_age');
+    const d   = await res.json();
+    if(d.age_secs < 1e6){
+      const m = Math.floor(d.age_secs/60), s = Math.floor(d.age_secs%60);
+      $('cache-info').textContent = `Cache: ${m}m ${s}s ago`;
+    }
+  }catch{}
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+$('m-symbol').addEventListener('input', function(){ this.value = this.value.toUpperCase(); });
+refreshTracked();
+setInterval(refreshTracked, 5000);
+refreshCacheAge();
+setInterval(refreshCacheAge, 30000);
+</script>
+</body>
+</html>

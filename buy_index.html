@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
-<title>Option Buy Robot v8.5</title>
+<title>Option Buy Robot v8.2</title>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet"/>
 <link rel="stylesheet" href="/static/css/buy_index.css"/>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
@@ -35,7 +35,6 @@
     <div class="ti"><span class="ti-k">SPIKE</span><span class="ti-v" id="tkMove">--</span></div>
     <div class="ti"><span class="ti-k">CONFIRM</span><span class="ti-v" id="tkConfirm" style="color:var(--cyan)">--</span></div>
     <div class="ti"><span class="ti-k">REGIME</span><span class="ti-v" id="tkRegime" style="color:var(--cyan)">--</span></div>
-    <div class="ti"><span class="ti-k">VOL ATR</span><span class="ti-v" id="tkVolAtr" style="color:var(--amber)">--</span></div>
     <div class="ti"><span class="ti-k">AI</span><span class="ti-v" id="tkAiScore" style="color:var(--purple)">--</span></div>
     <div class="ti"><span class="ti-k">TRAIL%</span><span class="ti-v" id="tkTrailPct" style="color:var(--amber)">--</span></div>
     <div class="ti"><span class="ti-k">LIVE P&amp;L</span><span class="ti-v" id="tkPL">--</span></div>
@@ -43,7 +42,7 @@
   </div>
   <div class="top-r">
     <span class="mode-pill-top demo" id="topModePill">🔵 DEMO</span>
-    <div class="chip">Capital: <b id="capVal">₹1,00,000</b></div>
+    <div class="chip">Capital: <b id="capVal">₹10,000</b></div>
     <div class="ws-pill">
       <div class="led" id="wsLed"></div>
       <span id="wsLbl">Disconnected</span>
@@ -75,25 +74,40 @@
       <div class="mode-info" id="modeInfo">Paper trading — no real orders</div>
     </div>
 
-    <!-- Watchlist -->
+    <!-- NIFTY Options -->
     <div class="lp-sec">
       <div class="lp-lbl" style="display:flex;align-items:center;justify-content:space-between;">
-        <span>Watchlist <span id="wlCount" class="wl-badge"></span></span>
-        <button id="wlSelectAllBtn" class="wl-selall-btn" onclick="toggleSelectAll()" title="Select / Unselect all stocks">Select All</button>
+        <span>NIFTY Options</span>
+        <button id="atmRefreshBtn" onclick="refreshAtm()" class="wl-selall-btn" title="Re-resolve ATM strike">↺ Refresh</button>
       </div>
-      <!-- Stock search -->
-      <div class="wl-search-wrap">
-        <div class="wl-search-row">
-          <svg class="wl-search-icon" viewBox="0 0 20 20" fill="none"><circle cx="8.5" cy="8.5" r="5.5" stroke="currentColor" stroke-width="1.6"/><path d="M13 13l3.5 3.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
-          <input type="text" id="wlSearchInput" class="wl-search-input" placeholder="Add stock e.g. RELIANCE…" autocomplete="off" spellcheck="false"/>
-          <span class="wl-spin" id="wlSpin" style="display:none">⟳</span>
+
+      <!-- ATM Card -->
+      <div class="nifty-atm-card" id="niftyAtmCard">
+        <div class="atm-top-row">
+          <div class="atm-item">
+            <div class="atm-k">Expiry</div>
+            <div class="atm-v" id="atmExpiry">—</div>
+          </div>
+          <div class="atm-item">
+            <div class="atm-k">ATM Strike</div>
+            <div class="atm-v b" id="atmStrike">—</div>
+          </div>
         </div>
-        <div class="wl-dropdown" id="wlDropdown"></div>
+        <div class="atm-opts-row">
+          <div class="atm-opt-card ce">
+            <div class="atm-opt-label">CE</div>
+            <div class="atm-opt-sym" id="atmCeSymbol">—</div>
+            <div class="atm-opt-price" id="atmCePrice">—</div>
+          </div>
+          <div class="atm-opt-card pe">
+            <div class="atm-opt-label">PE</div>
+            <div class="atm-opt-sym" id="atmPeSymbol">—</div>
+            <div class="atm-opt-price" id="atmPePrice">—</div>
+          </div>
+        </div>
+        <div class="atm-status" id="atmStatus">Auto-resolves on start</div>
       </div>
-      <!-- Watchlist items -->
-      <div class="wl-list" id="wlList">
-        <div class="wl-empty">No stocks — search above to add</div>
-      </div>
+
       <div class="btn-group">
         <button class="btn btn-go" id="toggleBtn" onclick="toggleRobot()">🎯 Start Buy Robot</button>
         <button class="btn btn-exit" id="exitBtn" onclick="manualExit()">🚨 Exit Trade Now</button>
@@ -163,6 +177,16 @@
         <div class="pnl-total zero" id="sessionPL">₹ --</div>
         <div class="pnl-sub" id="tradeCount">0 trades · 0W / 0L</div>
       </div>
+      <div class="day-target-row">
+        <div class="dt-info">
+          <span class="dt-k">Day Target (2.5%)</span>
+          <span class="dt-v" id="dayTargetVal">₹ --</span>
+        </div>
+        <div class="dt-track">
+          <div class="dt-fill" id="dayTargetFill" style="width:0%"></div>
+        </div>
+        <span class="dt-pct" id="dayTargetPct">0%</span>
+      </div>
     </div>
 
     <!-- Stat Grid -->
@@ -177,7 +201,6 @@
     <div class="lp-sec ai-sec">
       <div class="lp-lbl">AI Brain</div>
       <div class="ai-hero-row">
-        <!-- SVG ring for AI score -->
         <div class="ai-ring-wrap">
           <svg class="ai-ring-svg" viewBox="0 0 64 64">
             <circle class="ai-ring-bg"   cx="32" cy="32" r="26"/>
@@ -189,7 +212,6 @@
             <span class="ai-ring-sub">SCORE</span>
           </div>
         </div>
-        <!-- hidden bar — kept for JS compat -->
         <div style="display:none">
           <div class="ai-score-track"><div class="ai-score-fill" id="aiScoreFill"></div></div>
         </div>
@@ -235,12 +257,6 @@
         <div class="filter-row"><span class="filter-name">Breakeven trigger</span><span class="fval fv-ok" id="fvBreakeven">--</span></div>
         <div class="filter-row"><span class="filter-name">NIFTY reversal exit</span><span class="fval fv-ok" id="fvNiftyReversal">ON</span></div>
         <div class="filter-row"><span class="filter-name">Move velocity thr</span><span class="fval fv-ok" id="fvMoveVelocity">--</span></div>
-        <div class="filter-divider">── Advanced v8.5 ──</div>
-        <div class="filter-row"><span class="filter-name">Breakout Filter</span><span class="fval fv-ok" id="fvBreakout">--</span></div>
-        <div class="filter-row"><span class="filter-name">Consol. Range</span><span class="fval fv-ok" id="fvBreakoutRange">--</span></div>
-        <div class="filter-row"><span class="filter-name">Vol Gate</span><span class="fval fv-ok" id="fvVolGate">--</span></div>
-        <div class="filter-row"><span class="filter-name">Pre-spike ATR</span><span class="fval fv-ok" id="fvVolAtr">--</span></div>
-        <div class="filter-row"><span class="filter-name">Chop Rate</span><span class="fval fv-ok" id="fvChopRate">--</span></div>
       </div>
     </div>
 
@@ -261,13 +277,8 @@
         <button class="tf-btn"        onclick="setTF(3600,'tf3600')" id="tf3600">1H</button>
       </div>
       <div class="chart-toggle">
-        <button class="ct-btn active" id="ctN"    onclick="setChart('nifty')">Nifty</button>
-        <button class="ct-btn"        id="ctO"    onclick="setChart('option')">Option</button>
-        <div class="ct-sep" id="ctStockSep" style="display:none"></div>
-        <button class="ct-btn ct-stock" id="ctSS" onclick="setChart('stock_spot')" style="display:none">Spot</button>
-        <button class="ct-btn ct-stock" id="ctSC" onclick="setChart('stock_ce')"   style="display:none">CE</button>
-        <button class="ct-btn ct-stock" id="ctSP" onclick="setChart('stock_pe')"   style="display:none">PE</button>
-        <button class="ct-btn ct-clr"   id="ctSX" onclick="clearStockChart()"      style="display:none" title="Back to Nifty">✕</button>
+        <button class="ct-btn active" id="ctN" onclick="setChart('nifty')">Nifty</button>
+        <button class="ct-btn"        id="ctO" onclick="setChart('option')">Option</button>
       </div>
       <div class="ohlc-bar">
         <span>O:<b id="oO">--</b></span>
@@ -278,12 +289,10 @@
     </div>
     <!-- Drawing Toolbar -->
     <div class="draw-toolbar">
-      <!-- Cursor -->
       <button class="dt-btn active" id="dtCursor" onclick="setDrawTool('cursor')" title="Cursor (Esc)">
         <svg viewBox="0 0 16 16" fill="currentColor"><path d="M2 2l5.5 13 2-5 5-2z"/></svg>
       </button>
       <div class="dt-sep"></div>
-      <!-- Drawing tools -->
       <button class="dt-btn" id="dtHline" onclick="setDrawTool('hline')" title="Horizontal Line (H)">
         <svg viewBox="0 0 16 16" stroke="currentColor" stroke-width="1.8" fill="none"><line x1="1" y1="8" x2="15" y2="8"/><circle cx="1" cy="8" r="1.2" fill="currentColor"/><circle cx="15" cy="8" r="1.2" fill="currentColor"/></svg>
       </button>
@@ -297,7 +306,6 @@
         <svg viewBox="0 0 16 16" stroke="currentColor" stroke-width="1.8" fill="none"><line x1="8" y1="1" x2="8" y2="15"/><circle cx="8" cy="1" r="1.2" fill="currentColor"/><circle cx="8" cy="15" r="1.2" fill="currentColor"/></svg>
       </button>
       <div class="dt-sep"></div>
-      <!-- Chart type -->
       <div class="dt-ct-group">
         <button class="dt-ct active" id="ctypeCandle" onclick="setChartType('candle')" title="Candlestick">C</button>
         <button class="dt-ct"        id="ctypeHA"     onclick="setChartType('ha')"     title="Heikin-Ashi">HA</button>
@@ -305,7 +313,6 @@
         <button class="dt-ct"        id="ctypeArea"   onclick="setChartType('area')"   title="Area">A</button>
       </div>
       <div class="dt-sep"></div>
-      <!-- Clear drawings -->
       <button class="dt-btn dt-clr" onclick="clearDrawings()" title="Clear all drawings">
         <svg viewBox="0 0 16 16" stroke="currentColor" stroke-width="1.8" fill="none"><path d="M4 4l8 8M12 4l-8 8"/></svg>
       </button>
@@ -326,7 +333,6 @@
 
     <!-- Active Trade -->
     <div class="rp-trade-sec">
-      <!-- Live P&L hero display -->
       <div class="rp-hdr">
         <span class="lp-lbl" style="margin-bottom:0">Active Trade</span>
         <div class="live-pnl-hero" id="livePnlHero">--</div>
@@ -352,6 +358,11 @@
         <div class="lr">
           <span class="lk">Stop Loss <span class="lk-sub" id="tcSlPct">(15%)</span></span>
           <span class="lv r" id="tcSL">--</span>
+        </div>
+        <!-- Target limit sell order row -->
+        <div class="lr target-row" id="tcTargetRow" style="display:none">
+          <span class="lk">🎯 Target Sell <span class="lk-sub">(+2.5%)</span></span>
+          <span class="lv g" id="tcTargetPrice">--</span>
         </div>
         <div class="lr" id="tcTrailRow" style="display:none">
           <span class="lk">Trail Price <span class="lk-sub" id="tcTrPct">(25%)</span></span>
@@ -385,13 +396,13 @@
         <div class="lr" id="tcPeakPctRow" style="display:none"><span class="lk">Peak Profit %</span><span class="lv g" id="tcPeakPct">--</span></div>
         <div class="lr" id="tcProfRow"    style="display:none"><span class="lk">Peak Profit ₹</span><span class="lv g" id="tcPeakP">--</span></div>
         <div class="lr"><span class="lk">Qty</span><span class="lv" id="tcQty">--</span></div>
-        <!-- kept for JS compat, not shown in main card anymore (livePnlHero is the hero) -->
         <div class="lr"><span class="lk">Live P&amp;L</span><span class="lv" id="tcLivePL">--</span></div>
       </div>
 
       <div class="oid-row" id="orderIdRow">
         <div class="oid-lbl">📋 Order IDs</div>
         <div class="oid-b" id="oidBuy">—</div>
+        <div class="oid-tgt" id="oidTarget">—</div>
         <div class="oid-s" id="oidSell">—</div>
       </div>
     </div><!-- /rp-trade-sec -->
@@ -418,11 +429,10 @@
 <!-- ── STATUS BAR ─────────────────────────────────────────────── -->
 <div class="sbar">
   <div class="s-dot" id="sDot"></div>
-  <span id="sMsg">Ready — add stocks to watchlist and start</span>
+  <span id="sMsg">Ready — click Start to begin NIFTY trading</span>
   <span class="s-sep">·</span>
   <span id="sFilterMsg" style="color:var(--text3)"></span>
 </div>
-
 
 <script src="/static/js/buy_index.js"></script>
 </body>

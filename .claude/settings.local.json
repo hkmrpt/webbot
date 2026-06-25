@@ -15,7 +15,14 @@
       "Bash(python:*)",
       "Bash(grep -v '^--$')",
       "Bash(python3:*)",
-      "Bash(node:*)"
+      "Bash(node:*)",
+      "Bash(mkdir -p /c/Users/hkmrp/PycharmProjects/webbot/algobot/modules)",
+      "Bash(mkdir -p /c/Users/hkmrp/PycharmProjects/webbot/algobot/templates)",
+      "Bash(mkdir -p /c/Users/hkmrp/PycharmProjects/webbot/algobot/static/css)",
+      "Bash(mkdir -p /c/Users/hkmrp/PycharmProjects/webbot/algobot/static/js)",
+      "Bash(mkdir -p /c/Users/hkmrp/PycharmProjects/webbot/algobot/logs)",
+      "Bash(pip install:*)",
+      "Bash(grep -h \"^from \\\\|^import \" *.py)"
     ]
   }
 }

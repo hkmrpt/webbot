@@ -28,7 +28,7 @@ BANKNIFTY_TOKEN = 260105           # BANKNIFTY index token
 
 # ── Position Sizing ───────────────────────────────────────────
 LOT_SIZE            = 65
-CAPITAL             = 100_000.0
+CAPITAL             = 10_000.0
 MAX_RISK_PER_TRADE  = 0.01
 
 # ── AUTO Spike Detection (v8: ATR-based dynamic threshold) ────
@@ -76,7 +76,7 @@ TREND_CONSISTENCY_PCT   = 0.70    # % of ticks that must go in same dir
 TREND_COOLDOWN_TICKS    = 25      # ticks to wait before re-firing trend
 
 # ── Spike Confirmation ────────────────────────────────────────
-CONFIRM_SUSTAIN_PCT = 0.85         # was 0.70 — spike must hold more before confirming
+CONFIRM_SUSTAIN_PCT = 0.90         # spike must hold 90% — filters weak moves
 
 CONFIRM_ATR_HIGH    = 5.0
 CONFIRM_ATR_LOW     = 2.0
@@ -85,7 +85,7 @@ CONFIRM_TICKS_MID   = 3
 CONFIRM_TICKS_SLOW  = 4
 
 MOMENTUM_WINDOW     = 5
-MOMENTUM_MIN        = 10            # was 7 — require stronger momentum
+MOMENTUM_MIN        = 15            # higher = only strong momentum entries
 
 # ── Stop Loss ─────────────────────────────────────────────────
 BUY_SL_PCT          = 5.0          # initial SL (fallback)
@@ -162,15 +162,16 @@ RANGE_MIN_TICKS  = 10              # minimum ticks before range is valid
 RANGE_MAX_POINTS = 50.0            # max range width in points
 
 # ── Trade Controls ────────────────────────────────────────────
-SL_COOLDOWN_SECS    = 180
+SL_COOLDOWN_SECS    = 300          # 5-min cooldown after SL hit
 BUY_QTY             = 1
-MAX_TRADES_DAY      = 30
-MAX_DAILY_LOSS      = 3000.0
-DAILY_PROFIT_TARGET = 60000.0
+MAX_TRADES_DAY      = 5            # max 5 trades/day — quality over quantity
+MAX_DAILY_LOSS      = 150.0        # 1.5% of ₹10k — hard stop on losses
+DAILY_PROFIT_TARGET = 250.0        # fallback fixed (overridden by DAILY_PROFIT_PCT)
+DAILY_PROFIT_PCT    = 0.025        # 2.5% of day-start capital — dynamic target
 
 # ── Regression / Momentum ─────────────────────────────────────
 REGRESSION_WINDOW    = 20
-REGRESSION_SLOPE_MIN = 0.3
+REGRESSION_SLOPE_MIN = 0.5         # was 0.3 — require stronger directional slope
 
 OPTION_VOL_WINDOW   = 20
 OPTION_VOL_FACTOR   = 1.5

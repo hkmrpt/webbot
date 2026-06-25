@@ -121,6 +121,70 @@ def place_sell(tradingsymbol: str, quantity: int | None = None) -> tuple[str | N
     return _post_order(_order_payload(tradingsymbol, "SELL", qty))
 
 
+def place_limit_sell(tradingsymbol: str, quantity: int, limit_price: float) -> tuple[str | None, str | None]:
+    """
+    Place a LIMIT SELL order at limit_price — used as a standing profit-target order.
+    Price is rounded to nearest 0.05 (NFO option tick size).
+    """
+    qty     = quantity
+    tick    = 0.05
+    price   = round(round(limit_price / tick) * tick, 2)
+    payload = _order_payload(tradingsymbol, "SELL", qty)
+    payload["order_type"] = "LIMIT"
+    payload["price"]      = price
+    payload["tag"]        = "buybot_target"
+    logger.info("REAL LIMIT SELL  %s  qty=%d  price=%.2f", tradingsymbol, qty, price)
+    return _post_order(payload)
+
+
+def cancel_order(order_id: str) -> tuple[bool, str | None]:
+    """
+    Cancel an open order by order_id.
+    DELETE /oms/orders/regular/{order_id}?variety=regular
+    Returns (success: bool, error: str | None).
+    """
+    enctoken = _raw_enctoken()
+    cookie = (
+        f"kf_session={ZERODHA_CONFIG['kf_session']}; "
+        f"user_id={ZERODHA_CONFIG['user_id']}; "
+        f"public_token={ZERODHA_CONFIG['public_token']}; "
+        f"enctoken={enctoken}"
+    )
+    path = f"/oms/orders/regular/{order_id}?variety=regular"
+    headers = {
+        "Host":            KITE_HOST,
+        "Accept":          "application/json, text/plain, */*",
+        "Authorization":   f"enctoken {enctoken}",
+        "Content-Type":    "application/x-www-form-urlencoded",
+        "Cookie":          cookie,
+        "Origin":          "https://kite.zerodha.com",
+        "Referer":         "https://kite.zerodha.com/orders",
+        "User-Agent":      (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/146.0.0.0 Safari/537.36"
+        ),
+        "x-kite-userid":  ZERODHA_CONFIG["user_id"],
+        "x-kite-version": ZERODHA_CONFIG.get("version", "3.0.0"),
+    }
+    try:
+        conn = http.client.HTTPSConnection(KITE_HOST, timeout=10)
+        conn.request("DELETE", path, headers=headers)
+        resp = conn.getresponse()
+        raw  = resp.read().decode("utf-8")
+        conn.close()
+        data = json.loads(raw)
+        if data.get("status") == "success":
+            logger.info("Order cancelled — order_id=%s", order_id)
+            return True, None
+        err = data.get("message") or raw
+        logger.warning("Cancel failed for %s: %s", order_id, err)
+        return False, err
+    except Exception as exc:
+        logger.error("cancel_order error: %s", exc)
+        return False, str(exc)
+
+
 def fetch_balance() -> dict | None:
     """
     Fetch live equity funds/margins from Zerodha.

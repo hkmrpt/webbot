@@ -438,6 +438,12 @@ class BuyExitStrategy:
         except Exception as e:
             print(f"[CSV] write error: {e}")
 
+        try:
+            from excel_logger import write_trade_excel
+            write_trade_excel(result)
+        except Exception as e:
+            print(f"[XL] write error: {e}")
+
         # Teach the brain from this trade's outcome
         self._brain.on_trade_closed(result)
 

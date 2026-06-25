@@ -44,64 +44,13 @@ function resize() {
 }
 new ResizeObserver(resize).observe(wrap);
 
-// ── Watchlist ─────────────────────────────────────────────────
+// ── Watchlist (stubbed — NIFTY-only mode) ─────────────────────
 let _watchlistStocks = [];
 let _wlSearchTimer   = null;
-let _selectedStocks  = new Set();   // symbols ticked for trading
+let _selectedStocks  = new Set();
 
-async function loadWatchlist() {
-  try {
-    const data = await fetch('/api/watchlist').then(r => r.json());
-    _watchlistStocks = Array.isArray(data) ? data : [];
-    renderWatchlist();
-  } catch(e) { /* silent */ }
-}
-
-function renderWatchlist() {
-  const list = document.getElementById('wlList');
-  const cnt  = document.getElementById('wlCount');
-  if (!list) return;
-  if (cnt) cnt.textContent = _watchlistStocks.length ? `(${_watchlistStocks.length})` : '';
-  if (!_watchlistStocks.length) {
-    list.innerHTML = '<div class="wl-empty">No stocks — search above to add</div>';
-    return;
-  }
-  list.innerHTML = _watchlistStocks.map(s => {
-    const exp  = (s.expiry || '').substring(5);   // "2025-06-26" → "06-26"
-    const stk  = s.strike ? (+s.strike).toFixed(0) : '--';
-    const sel  = _selectedStocks.has(s.symbol);
-    return `<div class="wl-item${sel ? ' selected' : ''}" id="wl-${s.symbol}" data-symbol="${s.symbol}" data-score="0">
-      <button class="wl-sel${sel ? ' on' : ''}" onclick="toggleStockSelect('${s.symbol}')" title="${sel ? 'Click to deselect (will not trade)' : 'Click to select for trading'}">
-        ${sel ? '✓' : '○'}
-      </button>
-      <div class="wl-item-body" onclick="openStockDetail('${s.symbol}')" style="cursor:pointer">
-        <div class="wl-dir flat" id="wl-dir-${s.symbol}">—</div>
-        <div class="wl-item-info">
-          <div class="wl-item-row1">
-            <span class="wl-sym">${s.symbol}</span>
-            <span class="wl-chg flat" id="wl-chg-${s.symbol}">+0.00%</span>
-          </div>
-          <div class="wl-item-row2">
-            <span class="wl-spot" id="wl-spot-${s.symbol}">₹--</span>
-            <span class="wl-sep">·</span>
-            <span class="wl-strike-info">${stk} · ${exp}</span>
-          </div>
-          <div class="wl-item-row3">
-            <span class="wl-opt-price ce" id="wl-ce-${s.symbol}">${s.ce_symbol ? 'CE --' : ''}</span>
-            <span class="wl-opt-price pe" id="wl-pe-${s.symbol}">${s.pe_symbol ? 'PE --' : ''}</span>
-            <span class="wl-score" id="wl-score-${s.symbol}" title="Composite score: ATR · Momentum · Range · Week position · Premium">◆ --</span>
-            <span class="wl-pending" id="wl-pend-${s.symbol}" style="display:none"></span>
-          </div>
-          <div class="wl-item-row4">
-            <span class="wl-spike-thr" id="wl-spike-${s.symbol}" title="Spike threshold = 7-day avg daily range × 18%">⚡ --</span>
-          </div>
-        </div>
-      </div>
-      <button class="wl-del" onclick="removeWatchlistStock('${s.symbol}')" title="Remove">✕</button>
-    </div>`;
-  }).join('');
-  _updateWlSelCount();
-}
+function loadWatchlist() { /* no-op: NIFTY-only mode */ }
+function renderWatchlist() { /* no-op */ }
 
 function toggleStockSelect(symbol) {
   if (_selectedStocks.has(symbol)) {
@@ -849,6 +798,10 @@ socket.on('state', d => {
   isRunning = d.running; updateBtn();
   if (d.trading_mode != null) applyMode(d.trading_mode);
   if (d.active_sides) syncServerSides(d.active_sides);
+  if (d.nifty_atm) updateAtmPanel(d.nifty_atm);
+  if (d.ce_price != null) set('atmCePrice', '₹' + (d.ce_price || 0).toFixed(2));
+  if (d.pe_price != null) set('atmPePrice', '₹' + (d.pe_price || 0).toFixed(2));
+  updateDayTarget(d);
   if (d.index_name) {
     const lbl = document.getElementById('tkNLabel');
     if (lbl) lbl.textContent = d.index_name;
@@ -858,16 +811,20 @@ socket.on('state', d => {
   if (d.ce_price != null) set('tkCE', '₹' + (+d.ce_price).toFixed(2));
   if (d.pe_price != null) set('tkPE', '₹' + (+d.pe_price).toFixed(2));
 
-  // Live watchlist momentum update
-  if (d.multi_stocks) updateWatchlistLive(d.multi_stocks);
-  // Live-update stock detail modal if open
-  if (d.multi_stocks) _sdLiveUpdate(d.multi_stocks);
-
   // Order IDs
   if (d.last_order_id) {
     set('oidBuy', '▲ BUY: ' + d.last_order_id);
     document.getElementById('oidBuy').style.color = 'var(--green)';
   }
+  if (d.target_order_id) {
+    set('oidTarget', '🎯 TGT: ' + d.target_order_id);
+  } else {
+    set('oidTarget', '—');
+  }
+  // Show/hide target price row in trade card
+  const tgtRow = document.getElementById('tcTargetRow');
+  if (tgtRow) tgtRow.style.display = d.target_price ? 'flex' : 'none';
+  if (d.target_price) set('tcTargetPrice', '₹' + d.target_price.toFixed(2));
   if (d.last_exit_order_id) {
     set('oidSell', '▼ SELL: ' + d.last_exit_order_id);
     document.getElementById('oidSell').style.color = 'var(--red)';
@@ -1184,6 +1141,10 @@ socket.on('state', d => {
   if (d.logs && !logInit) { d.logs.forEach(appendLog); logInit = true; }
 });
 
+socket.on('nifty_atm_resolved', function(atm) {
+  updateAtmPanel(atm);
+});
+
 socket.on('trade_opened', d => {
   const t = Date.now() / 1000;
   markers.push({ type:'buy', side:d.side, price:d.entry, time:t });
@@ -1213,6 +1174,8 @@ socket.on('trade_closed', d => {
   document.getElementById('exitBtn').classList.remove('show');
   document.getElementById('tcProfitTrailRow').classList.remove('show');
   document.getElementById('tcRatchetRow').classList.remove('show');
+  const _tgtRowC = document.getElementById('tcTargetRow'); if (_tgtRowC) _tgtRowC.style.display = 'none';
+  set('oidTarget', '—');
   ['tcBreakevenRow','tcMoveTypeRow','tcMomentumRow'].forEach(id => { const el=document.getElementById(id); if(el) el.style.display='none'; });
   const timerRow = document.getElementById('tcTimerRow');
   if (timerRow) timerRow.style.display = 'none';
@@ -1484,17 +1447,9 @@ function toggleRobot() {
     socket.emit('stop_robot');
     isRunning = false; updateBtn();
   } else {
-    if (!_watchlistStocks.length) {
-      alert('Add at least one stock to the watchlist before starting'); return;
-    }
-    const activeSyms = [..._selectedStocks].filter(s => _watchlistStocks.some(w => w.symbol === s));
-    if (!activeSyms.length) {
-      alert('Tick at least one stock (✓) to enable trading'); return;
-    }
     if (currentMode === 'real') {
       const ok = confirm(
-        `🔴 Starting in REAL TRADING mode!\n\nActive stocks: ${activeSyms.join(', ')}\n\n` +
-        'Live BUY/SELL orders will be sent to Zerodha.\n\nConfirm to proceed.'
+        '🔴 Starting in REAL TRADING mode!\n\nNIFTY options will be auto-selected.\n\nLive BUY/SELL orders will be sent to Zerodha.\n\nConfirm to proceed.'
       );
       if (!ok) return;
     }
@@ -1505,8 +1460,9 @@ function toggleRobot() {
     bestTrade=null; worstTrade=null;
     niftyHist=[]; optHist=[]; candles=[];
     lastSkipReason=null;
-    set('oidBuy','—'); set('oidSell','—');
-    ['tcEntry','tcCurrent','tcSL','tcTrail','tcPeak','tcPeakPct','tcPeakP','tcQty','tcHeld','tcLivePL','tcAtrTrail','tcMinTrail']
+    set('oidBuy','—'); set('oidTarget','—'); set('oidSell','—');
+    const _tgtR = document.getElementById('tcTargetRow'); if (_tgtR) _tgtR.style.display = 'none';
+    ['tcEntry','tcCurrent','tcSL','tcTrail','tcTargetPrice','tcPeak','tcPeakPct','tcPeakP','tcQty','tcHeld','tcLivePL','tcAtrTrail','tcMinTrail']
       .forEach(id => set(id,'--'));
     ['tcTrailRow','tcPeakRow','tcPeakPctRow','tcProfRow','tcAtrRow']
       .forEach(id => { const el=document.getElementById(id); if(el) el.style.display='none'; });
@@ -1528,10 +1484,45 @@ function toggleRobot() {
     set('tkTrailPct','--'); set('trailLiveVal','--');
     set('tkConfirm','--'); set('tkJumpThr','--');
     set('tkCE','--'); set('tkPE','--');
-    set('tkVolAtr','--');
 
-    socket.emit('start_robot', { symbols: activeSyms });
+    socket.emit('start_robot', {});
     isRunning = true; updateBtn();
+  }
+}
+
+function refreshAtm() {
+  socket.emit('refresh_nifty_atm');
+  const btn = document.getElementById('atmRefreshBtn');
+  if (btn) { btn.textContent = '⟳ Resolving…'; btn.disabled = true; }
+}
+
+function updateAtmPanel(atm) {
+  if (!atm) return;
+  set('atmExpiry',  atm.expiry  || '—');
+  set('atmStrike',  atm.strike  ? atm.strike.toLocaleString('en-IN') : '—');
+  set('atmCeSymbol', atm.ce_symbol || '—');
+  set('atmPeSymbol', atm.pe_symbol || '—');
+  const atmStatus = document.getElementById('atmStatus');
+  if (atmStatus) atmStatus.textContent = '✅ ATM resolved — watching CE & PE';
+  const btn = document.getElementById('atmRefreshBtn');
+  if (btn) { btn.textContent = '↺ Refresh ATM'; btn.disabled = false; }
+}
+
+function updateDayTarget(d) {
+  const target = d.day_target || 0;
+  const pnl    = d.session_pnl || 0;
+  const pct    = target > 0 ? Math.min(100, Math.max(0, pnl / target * 100)) : 0;
+  const tgt    = document.getElementById('dayTargetVal');
+  const fill   = document.getElementById('dayTargetFill');
+  const pctEl  = document.getElementById('dayTargetPct');
+  if (tgt)   tgt.textContent  = '₹' + (target > 0 ? target.toFixed(0) : '--');
+  if (fill)  fill.style.width = pct.toFixed(1) + '%';
+  if (pctEl) {
+    pctEl.textContent = pct.toFixed(0) + '%';
+    pctEl.style.color = pct >= 100 ? 'var(--green)' : pct >= 50 ? 'var(--amber)' : 'var(--text2)';
+  }
+  if (fill) {
+    fill.style.background = pct >= 100 ? 'var(--green)' : pct >= 50 ? 'var(--amber)' : 'var(--purple)';
   }
 }
 
@@ -2056,5 +2047,4 @@ class MiniChart {
 }
 
 // Init
-loadWatchlist();
 requestAnimationFrame(resize);
