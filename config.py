@@ -31,6 +31,12 @@ LOT_SIZE            = 65
 CAPITAL             = 10_000.0
 MAX_RISK_PER_TRADE  = 0.01
 
+# Max-capital position sizing
+# Bot buys as many lots as capital allows: lots = floor(capital / (option_price × LOT_SIZE))
+# MAX_LOTS_PER_TRADE = 0  → no cap (pure max-capital)
+# MAX_LOTS_PER_TRADE = N  → hard ceiling at N lots (safety guard)
+MAX_LOTS_PER_TRADE  = 0            # 0 = use all available capital
+
 # ── AUTO Spike Detection (v8: ATR-based dynamic threshold) ────
 # When AUTO_JUMP is True, JUMP_PCT is IGNORED.
 # dynamic_jump_pts = Nifty tick ATR  × JUMP_ATR_MULTIPLIER
@@ -56,9 +62,9 @@ HIST_ATR_SPIKE_FRACTION = 0.18     # fraction of daily range = spike threshold
 # A move that takes longer than SPIKE_MAX_SECS is treated as a trend, not spike.
 SPIKE_LOOKBACK_SECS     = 10       # window (seconds) to measure cumulative move
 SPIKE_MAX_SECS          = 20       # move taking longer than this = trend, not spike
-SPIKE_MIN_SPEED_PCT_SEC = 0.02     # min speed as % of price per second
-                                   # e.g. NIFTY@22000 → 0.02% = 4.4 pts/sec min
-                                   #      RELIANCE@1500 → 0.02% = 0.30 pts/sec min
+SPIKE_MIN_SPEED_PCT_SEC = 0.012    # min speed as % of price per second
+                                   # e.g. NIFTY@22000 → 0.012% = 2.6 pts/sec min
+                                   #      RELIANCE@1500 → 0.012% = 0.18 pts/sec min
 
 # Legacy fixed threshold (used when AUTO_JUMP = False)
 JUMP_PCT            = 0.02         # % of Nifty price
@@ -76,21 +82,21 @@ TREND_CONSISTENCY_PCT   = 0.70    # % of ticks that must go in same dir
 TREND_COOLDOWN_TICKS    = 25      # ticks to wait before re-firing trend
 
 # ── Spike Confirmation ────────────────────────────────────────
-CONFIRM_SUSTAIN_PCT = 0.90         # spike must hold 90% — filters weak moves
+CONFIRM_SUSTAIN_PCT = 0.80         # spike must hold 80% — filters noise without over-filtering
 
 CONFIRM_ATR_HIGH    = 5.0
 CONFIRM_ATR_LOW     = 2.0
-CONFIRM_TICKS_FAST  = 2
-CONFIRM_TICKS_MID   = 3
-CONFIRM_TICKS_SLOW  = 4
+CONFIRM_TICKS_FAST  = 1
+CONFIRM_TICKS_MID   = 2
+CONFIRM_TICKS_SLOW  = 3
 
-MOMENTUM_WINDOW     = 5
-MOMENTUM_MIN        = 15            # higher = only strong momentum entries
+MOMENTUM_WINDOW     = 20           # was 5 — max score was 5, min was 15 (impossible)
+MOMENTUM_MIN        = 14           # 14/20 ticks directional = very strong momentum
 
 # ── Stop Loss ─────────────────────────────────────────────────
 BUY_SL_PCT          = 5.0          # initial SL (fallback)
 SL_PHASE1_PCT       = 12.0         # was 15.0
-SL_PHASE1_SECS      = 15           # was 30 — tighten faster (most trades done in 3-4s)
+SL_PHASE1_SECS      = 30           # give trade 30s to develop before phase-2 tightening
 SL_PHASE2_PCT       = 6.0          # was 8.0
 
 # ── NIFTY Reversal Exit ───────────────────────────────────────
@@ -98,23 +104,23 @@ NIFTY_REVERSAL_EXIT = True
 # Reversal must exceed this fraction of the spike threshold before triggering.
 # e.g. spike=36pts, buffer=0.35 → NIFTY must move back 12.6pts before exit.
 # Prevents hair-trigger exits on 1-tick noise bounces.
-NIFTY_REVERSAL_BUFFER_PCT = 0.35   # fraction of jump_threshold
+NIFTY_REVERSAL_BUFFER_PCT = 0.55   # fraction of jump_threshold — less hair-trigger
 # Don't exit on reversal if option is already this far in profit (trust the trail).
-NIFTY_REVERSAL_PROFIT_SKIP_PCT = 4.0  # option profit % above which reversal is ignored
+NIFTY_REVERSAL_PROFIT_SKIP_PCT = 2.0  # skip reversal exit once trade is 2%+ in profit
 
 # ── Trail ─────────────────────────────────────────────────────
 OPTION_ATR_PERIOD   = 10
 TRAIL_ATR_HIGH      = 5.0
 TRAIL_ATR_LOW       = 2.0
 TRAIL_PCT_HIGH      = 22.0         # was 35 — tighter ceiling protects gains
-TRAIL_PCT_LOW       = 6.0          # was 15 — much tighter floor
+TRAIL_PCT_LOW       = 8.0          # raised from 6% — 6% trail gets stopped by bid/ask spread noise
 BUY_TRAIL_PCT       = 12.0         # was 25 — default trail tightened
 
 # ── Profit-Tier Trail ─────────────────────────────────────────
 PROFIT_TRAIL_THRESHOLD_PCT = 3.0      # was 5.0 — tighter trail activates sooner
 
 PROFIT_TIER_TRAIL = [
-    (3.0,   3.0),   # peak ≥ 3%  → trail 3%  (was 5%→4%)
+    (3.0,   5.0),   # peak ≥ 3%  → trail 5%  (was 3% — too tight, exits on spread noise)
     (6.0,   4.5),   # peak ≥ 6%  → trail 4.5%
     (12.0,  7.0),   # peak ≥ 12% → trail 7%  (was 10%→6%)
     (20.0, 10.0),   # peak ≥ 20% → trail 10%
@@ -136,9 +142,9 @@ BREAKEVEN_TRIGGER_PCT     = 3.0
 
 # ── Time-based trail tightening ───────────────────────────────
 TRAIL_TIME_START_PCT      = 10.0   # was 15.0
-TRAIL_TIME_TIGHTEN_SECS   = 20     # was 60 — tighten every 20s, not 60s
-TRAIL_TIME_TIGHTEN_STEP   = 1.5    # was 2.0
-TRAIL_TIME_MIN_PCT        = 3.0    # was 5.0
+TRAIL_TIME_TIGHTEN_SECS   = 45     # was 20 — tighten every 45s, not 20s
+TRAIL_TIME_TIGHTEN_STEP   = 1.0    # was 1.5 — gentler tightening per interval
+TRAIL_TIME_MIN_PCT        = 4.0    # was 3.0 — floor raised to avoid spread stops
 
 # ── Move Type Detection ───────────────────────────────────────
 MOVE_VELOCITY_WINDOW   = 5         # ticks to measure velocity
@@ -165,16 +171,16 @@ RANGE_MAX_POINTS = 50.0            # max range width in points
 SL_COOLDOWN_SECS    = 300          # 5-min cooldown after SL hit
 BUY_QTY             = 1
 MAX_TRADES_DAY      = 5            # max 5 trades/day — quality over quantity
-MAX_DAILY_LOSS      = 150.0        # 1.5% of ₹10k — hard stop on losses
+MAX_DAILY_LOSS      = 300.0        # 3% of ₹10k — one SL at 12% on ₹20 option = ₹156
 DAILY_PROFIT_TARGET = 250.0        # fallback fixed (overridden by DAILY_PROFIT_PCT)
 DAILY_PROFIT_PCT    = 0.025        # 2.5% of day-start capital — dynamic target
 
 # ── Regression / Momentum ─────────────────────────────────────
 REGRESSION_WINDOW    = 20
-REGRESSION_SLOPE_MIN = 0.5         # was 0.3 — require stronger directional slope
+REGRESSION_SLOPE_MIN = 0.2         # was 0.5 — spikes happen in sideways markets too
 
 OPTION_VOL_WINDOW   = 20
-OPTION_VOL_FACTOR   = 1.5
+OPTION_VOL_FACTOR   = 1.2
 
 # ── Trading Hours ─────────────────────────────────────────────
 TRADE_START_H       = 9

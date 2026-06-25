@@ -53,7 +53,7 @@ from flask import Flask, send_file, request, jsonify
 from flask_socketio import SocketIO, emit
 
 from config import (
-    CAPITAL, BUY_QTY, MAX_TRADES_DAY, LOT_SIZE,
+    CAPITAL, BUY_QTY, MAX_TRADES_DAY, LOT_SIZE, MAX_LOTS_PER_TRADE,
     JUMP_PCT, CONFIRM_SUSTAIN_PCT,
     MOMENTUM_WINDOW, MOMENTUM_MIN,
     REGRESSION_WINDOW, REGRESSION_SLOPE_MIN,
@@ -174,6 +174,7 @@ RC = {
     "max_trades_day":         MAX_TRADES_DAY,
     "max_daily_loss":         MAX_DAILY_LOSS,
     "daily_profit_target":    DAILY_PROFIT_TARGET,
+    "max_lots_per_trade":     MAX_LOTS_PER_TRADE,
     "trade_timeout_secs":     TRADE_TIMEOUT_SECS,
     "regression_window":      REGRESSION_WINDOW,
     "regression_slope_min":   REGRESSION_SLOPE_MIN,
@@ -1038,6 +1039,13 @@ def _enter_trade_state(side, nifty_price, override_params: dict | None = None):
     sl_pct_for_mm = p.get("sl_pct_p1", RC["sl_phase1_pct"])
     mm_lot_size   = sl.get("lot_size") or LOT_SIZE
 
+    # Max-capital position sizing: buy as many lots as capital allows
+    capital    = S["capital"]
+    cost_per_lot = opt_price * mm_lot_size
+    auto_lots  = max(1, int(capital / cost_per_lot)) if cost_per_lot > 0 else 1
+    cap_limit  = RC.get("max_lots_per_trade", 0)
+    qty_lots   = min(auto_lots, cap_limit) if cap_limit > 0 else auto_lots
+
     info = S["exit_engine"].open_leg(
         side, opt_price,
         sl_pct_override         = sl_pct_for_mm,
@@ -1048,6 +1056,7 @@ def _enter_trade_state(side, nifty_price, override_params: dict | None = None):
         seed_prices=seed,
         symbol=S.get("index_name", ""),
         option_symbol=sl.get("symbol", ""),
+        qty_override=qty_lots,
     )
 
     S["trade_open"]         = True
@@ -1065,6 +1074,7 @@ def _enter_trade_state(side, nifty_price, override_params: dict | None = None):
     jmp_label  = (f"ATR-auto={S['jump_threshold']:.2f}pts" if RC["auto_jump"]
                   else f"fixed={S['jump_threshold']:.2f}pts")
 
+    total_cost = round(opt_price * info["qty"] * mm_lot_size, 2)
     logs = [
         (
             f"▲ BUY {side} [{mode_label}]  entry=₹{opt_price:.2f}  "
@@ -1078,6 +1088,7 @@ def _enter_trade_state(side, nifty_price, override_params: dict | None = None):
             f"→{p.get('sl_pct_p2', RC['sl_phase2_pct'])}% "
             f"after {p.get('sl_phase1_secs', RC['sl_phase1_secs'])}s)  "
             f"qty={info['qty']} lot ({info['qty'] * mm_lot_size} units)  "
+            f"capital=₹{capital:,.0f}  deployed=₹{total_cost:,.0f}  "
             f"trail={p.get('trail_pct', RC['trail_pct_low'])}% "
             f"timeout={p.get('timeout_secs', RC.get('trade_timeout_secs', 60))}s",
             "info",
@@ -1102,7 +1113,7 @@ def _enter_trade_state(side, nifty_price, override_params: dict | None = None):
     order_intent = {
         "action":      "buy",
         "symbol":      sl["symbol"],
-        "qty":         info["qty"] * LOT_SIZE,
+        "qty":         info["qty"] * mm_lot_size,
         "side":        side,
         "entry_price": opt_price,   # used for +2.5% limit sell target
     } if sl["symbol"] else None
