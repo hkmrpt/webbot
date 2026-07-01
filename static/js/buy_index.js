@@ -437,6 +437,14 @@ function _tfToZerodhaInterval(tf) {
   if (tf <= 1800) return '30minute';
   return '60minute';
 }
+function _histCandleDuration(tf) {
+  if (tf <= 60)   return 60;
+  if (tf <= 180)  return 180;
+  if (tf <= 300)  return 300;
+  if (tf <= 900)  return 900;
+  if (tf <= 1800) return 1800;
+  return 3600;
+}
 
 function setTF(tf, id) {
   TF = tf;
@@ -492,43 +500,83 @@ function buildCandles() {
 
     if (!pre.length && !live.length) { candles = []; return; }
 
-    // Start with historical candles as immutable base
+    // Start with historical candles
     candles = pre.map(c => ({ t: c.t, o: c.o, h: c.h, l: c.l, c: c.c, v: c.v || 0 }));
 
-    // Bucket live ticks using current TF, append after historical data
-    if (live.length) {
-      const lastPreT = candles.length ? candles[candles.length - 1].t : 0;
-      const liveMap  = new Map();
+    // Merge live ticks: update last candle in-place + append new candles after it
+    if (live.length && candles.length) {
+      const lastC = candles[candles.length - 1];
+      const histInterval = _histCandleDuration(TF);
+      const lastCEnd = lastC.t + histInterval;
+
       for (const { t, v } of live) {
+        if (t < lastC.t) continue;
+        if (t < lastCEnd) {
+          lastC.h = Math.max(lastC.h, v);
+          lastC.l = Math.min(lastC.l, v);
+          lastC.c = v;
+        }
+      }
+
+      const liveMap = new Map();
+      for (const { t, v } of live) {
+        if (t < lastCEnd) continue;
         const k = Math.floor(t / TF) * TF;
         if (!liveMap.has(k)) liveMap.set(k, []);
         liveMap.get(k).push(v);
       }
       for (const [t, arr] of [...liveMap.entries()].sort((a, b) => a[0] - b[0])) {
-        if (t > lastPreT) {
-          candles.push({ t, o: arr[0], h: Math.max(...arr), l: Math.min(...arr), c: arr[arr.length - 1] });
-        }
+        candles.push({ t, o: arr[0], h: Math.max(...arr), l: Math.min(...arr), c: arr[arr.length - 1] });
       }
+    } else if (live.length) {
+      // No historical — pure tick candles
+      const b = new Map();
+      for (const { t, v } of live) {
+        const k = Math.floor(t / TF) * TF;
+        if (!b.has(k)) b.set(k, []);
+        b.get(k).push(v);
+      }
+      candles = [...b.entries()].sort((a, c) => a[0] - c[0])
+        .map(([t, a]) => ({ t, o: a[0], h: Math.max(...a), l: Math.min(...a), c: a[a.length-1] }));
     }
     return;
   }
 
   // Nifty / Option chart
   if (chartMode === 'nifty' && niftyHistCandles.length) {
-    // Start with historical candles from Zerodha API
     candles = niftyHistCandles.map(c => ({ t: c.t, o: c.o, h: c.h, l: c.l, c: c.c, v: c.v || 0 }));
-    // Append live ticks after the last historical candle
+
+    // Append live candles from WebSocket ticks (niftyHist)
     if (niftyHist.length) {
-      const lastHistT = candles.length ? candles[candles.length - 1].t : 0;
-      const liveBuckets = new Map();
+      // Group live ticks into TF-sized buckets using their own timestamps
+      const buckets = new Map();
       for (const { t, v } of niftyHist) {
-        if (t <= lastHistT) continue;
         const k = Math.floor(t / TF) * TF;
-        if (!liveBuckets.has(k)) liveBuckets.set(k, []);
-        liveBuckets.get(k).push(v);
+        if (!buckets.has(k)) buckets.set(k, []);
+        buckets.get(k).push(v);
       }
-      for (const [t, a] of [...liveBuckets.entries()].sort((x, y) => x[0] - y[0])) {
-        candles.push({ t, o: a[0], h: Math.max(...a), l: Math.min(...a), c: a[a.length - 1] });
+
+      // Sort buckets by time
+      const sorted = [...buckets.entries()].sort((a, b) => a[0] - b[0]);
+
+      // First bucket = update last historical candle (current forming candle)
+      if (sorted.length > 0) {
+        const [, firstVals] = sorted[0];
+        const lastC = candles[candles.length - 1];
+        for (const v of firstVals) {
+          lastC.h = Math.max(lastC.h, v);
+          lastC.l = Math.min(lastC.l, v);
+        }
+        lastC.c = firstVals[firstVals.length - 1];
+      }
+
+      // Remaining buckets = new live candles
+      for (let i = 1; i < sorted.length; i++) {
+        const [t, arr] = sorted[i];
+        candles.push({
+          t, o: arr[0], h: Math.max(...arr),
+          l: Math.min(...arr), c: arr[arr.length - 1]
+        });
       }
     }
     return;
@@ -556,9 +604,11 @@ function rebuildAndDraw() {
   }
   draw();
 }
+let _lastLivePrice = null;
 function addNiftyPrice(p) {
   if (!p || isNaN(p)) return;
   if (!cv.width) resize();
+  _lastLivePrice = p;
   niftyHist.push({ t: Date.now()/1000, v: p });
   if (niftyHist.length > 500000) niftyHist.shift();
   if (chartMode === 'nifty') rebuildAndDraw();
@@ -2002,8 +2052,9 @@ function set(id, v) { const e = document.getElementById(id); if (e) e.textConten
 // Server sends full state (including logs) on connect — no extra get_state needed
 socket.on('connect', () => {
   logInit = false; clearLogs();
-  if (!_niftyHistLoaded) _loadNiftyHistorical();
+  _loadNiftyHistorical();
 });
+
 socket.on('ws_status', d  => {
   document.getElementById('wsLed').classList.toggle('on', d.connected);
   document.getElementById('wsLbl').textContent = d.connected ? 'Live' : 'Disconnected';
@@ -2350,6 +2401,12 @@ socket.on('state', d => {
     addNiftyPrice(d.nifty_price);
   }
   if (d.opt_price != null && d.trade_open) addOptPrice(d.opt_price);
+
+  // Multi-stock live feeds
+  if (d.multi_stocks) {
+    updateWatchlistLive(d.multi_stocks);
+    _sdLiveUpdate(d.multi_stocks);
+  }
 
   // Confirm ticker
   if (d.pending_side) {

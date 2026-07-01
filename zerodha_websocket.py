@@ -50,7 +50,7 @@ async def _recv(ws, recv_queue: asyncio.Queue) -> None:
             data = json.loads(msg)
             if isinstance(data, list):
                 await recv_queue.put(data)
-        except (json.JSONDecodeError, TypeError):
+        except (json.JSONDecodeError, TypeError, ValueError):
             ticks = _decoder.decode(msg)
             simplified = [
                 {

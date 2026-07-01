@@ -898,20 +898,46 @@ def _run_order_intent(intent, opened_payload=None, closed_payload=None):
 
 # ── Tick processor ────────────────────────────────────────────────────────────
 def process_ticks(ticks):
+    if ticks:
+        tokens_in = {t.get("instrument_token") for t in ticks}
+        idx = S.get("index_token")
+        if idx not in tokens_in:
+            log(f"[TICK] got tokens={tokens_in} but index_token={idx} NOT in ticks", "warning")
+        else:
+            price = next((t["last_price"] for t in ticks if t.get("instrument_token") == idx), None)
+            log(f"[TICK] NIFTY={price} tokens={tokens_in}", "info")
     trading_active = S["running"] or S["trade_open"]
 
     if not trading_active:
         # Robot stopped — still update prices for live dashboard display
+        _need_atm = False
         for tick in ticks:
             token = tick.get("instrument_token")
             price = tick.get("last_price")
-            vol   = tick.get("volume_traded") or tick.get("volume") or 0
             if price is None:
                 continue
             with _state_lock:
                 if token == S["index_token"]:
                     S["nifty_price"] = price
                     S["nifty_ticks"].append(price)
+                    # Auto-resolve ATM if not yet resolved
+                    if not S.get("nifty_atm") and not S.get("_idle_atm_pending"):
+                        S["_idle_atm_pending"] = True
+                        _need_atm = price
+                # Update CE/PE slot prices even when stopped
+                for side in ("CE", "PE"):
+                    sl = S["slots"][side]
+                    if token == sl["token"]:
+                        sl["price"] = price
+        if _need_atm:
+            def _idle_resolve(p=_need_atm):
+                atm = _resolve_nifty_atm(p)
+                if atm:
+                    _apply_nifty_atm(atm)
+                    log(f"[ATM] Auto-resolved (idle): strike={atm['strike']}", "info")
+                with _state_lock:
+                    S["_idle_atm_pending"] = False
+            threading.Thread(target=_idle_resolve, daemon=True).start()
         broadcast()
         return
 
@@ -1841,6 +1867,7 @@ def _ws_thread():
                     "success" if connected else "error")
                 if connected and S["subscribed_tokens"]:
                     await send_q.put({"a": "subscribe", "v": S["subscribed_tokens"]})
+                    await send_q.put({"a": "mode", "v": ["full", S["subscribed_tokens"]]})
                     log(f"Subscribed: {S['subscribed_tokens']}", "info")
             elif isinstance(msg, list):
                 process_ticks(msg)
@@ -1869,10 +1896,10 @@ def _subscribe(tokens):
         existing.update(tokens)
         S["subscribed_tokens"] = list(existing)
     if S["ws_send_queue"] and S["ws_loop"]:
-        asyncio.run_coroutine_threadsafe(
-            S["ws_send_queue"].put({"a": "subscribe", "v": tokens}),
-            S["ws_loop"],
-        )
+        async def _sub_and_mode():
+            await S["ws_send_queue"].put({"a": "subscribe", "v": tokens})
+            await S["ws_send_queue"].put({"a": "mode", "v": ["full", tokens]})
+        asyncio.run_coroutine_threadsafe(_sub_and_mode(), S["ws_loop"])
 
 
 def _unsubscribe(tokens):
@@ -2373,11 +2400,11 @@ def on_stop():
     _close_active_trade(reason="manual")
 
     with _state_lock:
-        tokens = [S["index_token"]]
+        unsub_tokens = []
         for side in ("CE", "PE"):
             t = S["slots"][side]["token"]
             if t:
-                tokens.append(t)
+                unsub_tokens.append(t)
         S["running"]      = False
         S["trade_open"]   = False
         S["active_sides"] = set()
@@ -2385,7 +2412,9 @@ def on_stop():
         S["slots"]        = {"CE": _make_opt_slot(), "PE": _make_opt_slot()}
         _reset_pending()
 
-    _unsubscribe(tokens)
+    # Only unsubscribe option tokens — keep index token subscribed for live dashboard
+    if unsub_tokens:
+        _unsubscribe(unsub_tokens)
     log("Buy Robot v8.2 stopped.", "warning")
     broadcast()
 
@@ -2976,8 +3005,46 @@ def api_add_to_watchlist():
         return jsonify({"error": str(exc)}), 500
 
 
+def _periodic_broadcast():
+    """Broadcast state every second so UI always has fresh prices."""
+    import time as _t
+    while True:
+        _t.sleep(1)
+        try:
+            broadcast()
+        except Exception:
+            pass
+
+
+def _nifty_ltp_poller():
+    """Poll NIFTY spot price via REST API every 2s as fallback when WS doesn't deliver index ticks."""
+    import time as _t
+    while True:
+        _t.sleep(2)
+        try:
+            price = _fetch_nifty_ltp()
+            if price is None:
+                continue
+            with _state_lock:
+                S["nifty_price"] = price
+                S["nifty_ticks"].append(price)
+                S["nifty_tick_times"].append(datetime.now())
+                _vol_detector.add(price)
+                _mtf_analyzer.add_tick(price)
+                S["nifty_atr_ticks"].append(price)
+                S["regression_slope"] = _regression_slope(list(S["nifty_ticks"]))
+                _update_jump_threshold(price)
+        except Exception:
+            pass
+
+
 if __name__ == "__main__":
     _subscribe([NIFTY_TOKEN])
     t = threading.Thread(target=_ws_thread, daemon=True)
     t.start()
+    pb = threading.Thread(target=_periodic_broadcast, daemon=True)
+    pb.start()
+    # NIFTY spot price REST poller — fills in when WS doesn't send index ticks
+    nifty_poll = threading.Thread(target=_nifty_ltp_poller, daemon=True)
+    nifty_poll.start()
     socketio.run(app, host="0.0.0.0", port=5001, debug=False, allow_unsafe_werkzeug=True)
