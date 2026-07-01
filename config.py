@@ -28,7 +28,7 @@ BANKNIFTY_TOKEN = 260105           # BANKNIFTY index token
 
 # ── Position Sizing ───────────────────────────────────────────
 LOT_SIZE            = 65
-CAPITAL             = 10_000.0
+CAPITAL             = 100_000.0
 MAX_RISK_PER_TRADE  = 0.02         # risk 2% of capital per trade (ATR-based sizing)
 
 # Max-capital position sizing
