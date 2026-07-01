@@ -2064,8 +2064,9 @@ socket.on('connect', () => {
 });
 
 socket.on('ws_status', d  => {
-  document.getElementById('wsLed').classList.toggle('on', d.connected);
-  document.getElementById('wsLbl').textContent = d.connected ? 'Live' : 'Disconnected';
+  const _wl = document.getElementById('wsLed');
+  if (_wl) _wl.classList.toggle('on', d.connected);
+  set('wsLbl', d.connected ? 'Live' : 'Disconnected');
 });
 socket.on('log', appendLog);
 
@@ -2307,8 +2308,8 @@ socket.on('state', d => {
     const mult = d.adv_vol_mult || 1.0;
     const revRate = d.adv_vol_rev_rate != null ? (+d.adv_vol_rev_rate * 100).toFixed(0) + '%' : '--';
     set('tkVolAtr', atr + 'p');
-    document.getElementById('tkVolAtr').style.color =
-      mult >= 1.2 ? 'var(--green)' : mult <= 0.8 ? 'var(--amber)' : 'var(--cyan)';
+    const _tkVA = document.getElementById('tkVolAtr');
+    if (_tkVA) _tkVA.style.color = mult >= 1.2 ? 'var(--green)' : mult <= 0.8 ? 'var(--amber)' : 'var(--cyan)';
     const gateEl = document.getElementById('fvVolGate');
     if (gateEl) {
       if (!d.adv_vol_gate_enabled) {
@@ -2325,8 +2326,8 @@ socket.on('state', d => {
     }
     set('fvVolAtr', atr + ' pts');
     set('fvChopRate', revRate);
-    document.getElementById('fvChopRate').className =
-      'fval ' + (+d.adv_vol_rev_rate >= 0.65 ? 'fv-block' : +d.adv_vol_rev_rate >= 0.45 ? 'fv-warn' : 'fv-ok');
+    const _crEl = document.getElementById('fvChopRate');
+    if (_crEl) _crEl.className = 'fval ' + (+d.adv_vol_rev_rate >= 0.65 ? 'fv-block' : +d.adv_vol_rev_rate >= 0.45 ? 'fv-warn' : 'fv-ok');
   }
   if (d.adv_breakout_range != null) {
     const br = d.adv_breakout_range;
@@ -2407,8 +2408,9 @@ socket.on('state', d => {
   if (d.confirm_needed != null) { confirmTicks = d.confirm_needed; rebuildConfirmDots(confirmTicks); }
 
   if (d.ws_connected !== undefined) {
-    document.getElementById('wsLed').classList.toggle('on', d.ws_connected);
-    document.getElementById('wsLbl').textContent = d.ws_connected ? 'Live' : 'Disconnected';
+    const _wl2 = document.getElementById('wsLed');
+    if (_wl2) _wl2.classList.toggle('on', d.ws_connected);
+    set('wsLbl', d.ws_connected ? 'Live' : 'Disconnected');
   }
 
   // Chart feeds (NIFTY + option prices already handled at top of handler)
