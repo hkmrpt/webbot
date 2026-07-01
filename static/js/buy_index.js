@@ -458,16 +458,21 @@ function setTF(tf, id) {
   }
 }
 
-async function _loadNiftyHistorical() {
+async function _loadNiftyHistorical(retries) {
+  retries = retries || 0;
   const interval = _tfToZerodhaInterval(TF);
   try {
-    const data = await fetch('/api/nifty_historical?interval=' + interval).then(r => r.json());
-    if (!data.error && Array.isArray(data)) {
+    const resp = await fetch('/api/nifty_historical?interval=' + interval);
+    const data = await resp.json();
+    if (!data.error && Array.isArray(data) && data.length) {
       niftyHistCandles = data;
       _niftyHistLoaded = true;
+    } else if (retries < 3) {
+      setTimeout(() => _loadNiftyHistorical(retries + 1), 2000);
     }
   } catch(e) {
     console.error('NIFTY historical load failed:', e);
+    if (retries < 3) setTimeout(() => _loadNiftyHistorical(retries + 1), 2000);
   }
   rebuildAndDraw();
 }
@@ -2052,7 +2057,10 @@ function set(id, v) { const e = document.getElementById(id); if (e) e.textConten
 // Server sends full state (including logs) on connect — no extra get_state needed
 socket.on('connect', () => {
   logInit = false; clearLogs();
-  _loadNiftyHistorical();
+  _loadNiftyHistorical(0);
+  // Ensure chart renders even if historical API fails — retry draw with live ticks
+  setTimeout(() => { resize(); rebuildAndDraw(); }, 2000);
+  setTimeout(() => { rebuildAndDraw(); }, 5000);
 });
 
 socket.on('ws_status', d  => {
@@ -2087,6 +2095,17 @@ socket.on('error', d => {
 });
 
 socket.on('state', d => {
+  // ── NIFTY price display ──
+  if (d.nifty_price != null) {
+    const el = document.getElementById('tkN');
+    if (el) {
+      el.textContent = '₹' + d.nifty_price.toFixed(2);
+      el.className = 'ti-v';
+    }
+    addNiftyPrice(d.nifty_price);
+  }
+  if (d.opt_price != null && d.trade_open) addOptPrice(d.opt_price);
+
   isRunning = d.running; updateBtn();
   if (d.trading_mode != null) applyMode(d.trading_mode);
   if (d.active_sides) syncServerSides(d.active_sides);
@@ -2392,15 +2411,7 @@ socket.on('state', d => {
     document.getElementById('wsLbl').textContent = d.ws_connected ? 'Live' : 'Disconnected';
   }
 
-  // Chart feeds
-  if (d.nifty_price != null) {
-    const old = chartMode === 'nifty' ? lastP : null;
-    const el  = document.getElementById('tkN');
-    el.textContent = '₹' + d.nifty_price.toFixed(2);
-    el.className   = 'ti-v ' + (old==null ? '' : d.nifty_price>old ? 'up' : 'dn');
-    addNiftyPrice(d.nifty_price);
-  }
-  if (d.opt_price != null && d.trade_open) addOptPrice(d.opt_price);
+  // Chart feeds (NIFTY + option prices already handled at top of handler)
 
   // Multi-stock live feeds
   if (d.multi_stocks) {

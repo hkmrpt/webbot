@@ -48,6 +48,7 @@ async def _recv(ws, recv_queue: asyncio.Queue) -> None:
             continue
         try:
             data = json.loads(msg)
+            _log(f"JSON msg: {str(data)[:200]}")
             if isinstance(data, list):
                 await recv_queue.put(data)
         except (json.JSONDecodeError, TypeError, ValueError):
@@ -61,7 +62,12 @@ async def _recv(ws, recv_queue: asyncio.Queue) -> None:
                 if "instrument_token" in t and "last_price" in t
             ]
             if simplified:
+                tokens = [t["instrument_token"] for t in simplified]
+                has_nifty = 256265 in tokens
+                _log(f"BIN ticks={len(simplified)} tokens={tokens} NIFTY={'YES' if has_nifty else 'NO'}")
                 await recv_queue.put(simplified)
+            else:
+                _log(f"BIN decode: 0 ticks from {len(msg)} bytes, raw_decoded={len(ticks)}")
 
 
 async def _send(ws, send_queue: asyncio.Queue) -> None:

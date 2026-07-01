@@ -798,9 +798,13 @@ def _build_state_payload():
 # ── Broadcast ─────────────────────────────────────────────────────────────────
 def broadcast():
     """Build state snapshot under the lock, emit outside it."""
-    with _state_lock:
-        payload = _build_state_payload()
-    socketio.emit("state", payload, namespace="/")
+    try:
+        with _state_lock:
+            payload = _build_state_payload()
+        socketio.emit("state", payload, namespace="/")
+    except Exception as e:
+        print(f"[BCAST ERROR] {e}")
+        import traceback; traceback.print_exc()
 
 
 # ── Order intent executor ─────────────────────────────────────────────────────
@@ -898,14 +902,9 @@ def _run_order_intent(intent, opened_payload=None, closed_payload=None):
 
 # ── Tick processor ────────────────────────────────────────────────────────────
 def process_ticks(ticks):
-    if ticks:
-        tokens_in = {t.get("instrument_token") for t in ticks}
-        idx = S.get("index_token")
-        if idx not in tokens_in:
-            log(f"[TICK] got tokens={tokens_in} but index_token={idx} NOT in ticks", "warning")
-        else:
-            price = next((t["last_price"] for t in ticks if t.get("instrument_token") == idx), None)
-            log(f"[TICK] NIFTY={price} tokens={tokens_in}", "info")
+    tokens_in = {t.get("instrument_token") for t in ticks}
+    has_nifty = NIFTY_TOKEN in tokens_in
+    print(f"[PROC] tokens={tokens_in} has_nifty={has_nifty} idx={S.get('index_token')} running={S['running']}")
     trading_active = S["running"] or S["trade_open"]
 
     if not trading_active:
@@ -917,8 +916,9 @@ def process_ticks(ticks):
             if price is None:
                 continue
             with _state_lock:
-                if token == S["index_token"]:
+                if token == NIFTY_TOKEN or token == S.get("index_token"):
                     S["nifty_price"] = price
+                    print(f"[SET] nifty_price={price}")
                     S["nifty_ticks"].append(price)
                     # Auto-resolve ATM if not yet resolved
                     if not S.get("nifty_atm") and not S.get("_idle_atm_pending"):
@@ -955,7 +955,7 @@ def process_ticks(ticks):
             continue
 
         with _state_lock:
-            if token == S["index_token"]:
+            if token == NIFTY_TOKEN or token == S["index_token"]:
                 S["nifty_price"] = price
                 S["nifty_ticks"].append(price)
                 S["nifty_tick_times"].append(datetime.now())
@@ -1867,7 +1867,6 @@ def _ws_thread():
                     "success" if connected else "error")
                 if connected and S["subscribed_tokens"]:
                     await send_q.put({"a": "subscribe", "v": S["subscribed_tokens"]})
-                    await send_q.put({"a": "mode", "v": ["full", S["subscribed_tokens"]]})
                     log(f"Subscribed: {S['subscribed_tokens']}", "info")
             elif isinstance(msg, list):
                 process_ticks(msg)
@@ -1896,10 +1895,10 @@ def _subscribe(tokens):
         existing.update(tokens)
         S["subscribed_tokens"] = list(existing)
     if S["ws_send_queue"] and S["ws_loop"]:
-        async def _sub_and_mode():
-            await S["ws_send_queue"].put({"a": "subscribe", "v": tokens})
-            await S["ws_send_queue"].put({"a": "mode", "v": ["full", tokens]})
-        asyncio.run_coroutine_threadsafe(_sub_and_mode(), S["ws_loop"])
+        asyncio.run_coroutine_threadsafe(
+            S["ws_send_queue"].put({"a": "subscribe", "v": tokens}),
+            S["ws_loop"],
+        )
 
 
 def _unsubscribe(tokens):
@@ -3017,13 +3016,17 @@ def _periodic_broadcast():
 
 
 def _nifty_ltp_poller():
-    """Poll NIFTY spot price via REST API every 2s as fallback when WS doesn't deliver index ticks."""
+    """Poll NIFTY spot price via REST API every 2s — always keeps nifty_price fresh."""
     import time as _t
+    _poll_count = 0
     while True:
         _t.sleep(2)
         try:
             price = _fetch_nifty_ltp()
             if price is None:
+                _poll_count += 1
+                if _poll_count <= 3:
+                    log("[LTP-POLL] _fetch_nifty_ltp returned None", "warning")
                 continue
             with _state_lock:
                 S["nifty_price"] = price
@@ -3034,8 +3037,13 @@ def _nifty_ltp_poller():
                 S["nifty_atr_ticks"].append(price)
                 S["regression_slope"] = _regression_slope(list(S["nifty_ticks"]))
                 _update_jump_threshold(price)
-        except Exception:
-            pass
+            _poll_count += 1
+            if _poll_count <= 3:
+                log(f"[LTP-POLL] NIFTY={price:.2f} (REST fallback)", "info")
+        except Exception as e:
+            _poll_count += 1
+            if _poll_count <= 3:
+                log(f"[LTP-POLL] Error: {e}", "error")
 
 
 if __name__ == "__main__":
