@@ -96,12 +96,14 @@ export function bollinger(closes, period, mult) {
 }
 
 export function vwap(cndls) {
+  // v||1 fallback: index charts (NIFTY) have no volume — degrade to the
+  // cumulative typical-price mean instead of drawing nothing.
   const out = [];
   let cumTPV = 0, cumVol = 0;
   for (const c of cndls) {
-    if (!c.v) { out.push(null); continue; }
+    const v = c.v || 1;
     const tp = (c.h + c.l + c.c) / 3;
-    cumTPV += tp * c.v; cumVol += c.v;
+    cumTPV += tp * v; cumVol += v;
     out.push(cumVol > 0 ? cumTPV / cumVol : null);
   }
   return out;
@@ -211,11 +213,13 @@ export function mfi(cndls, period) {
 }
 
 export function obv(cndls) {
+  // v||1 fallback: with no volume OBV degrades to a cumulative tick-direction
+  // line (still directional) instead of a dead flat zero.
   const out = new Array(cndls.length).fill(null);
   if (!cndls.length) return out;
-  out[0] = cndls[0].v || 0;
+  out[0] = cndls[0].v || 1;
   for (let i = 1; i < cndls.length; i++) {
-    const vol = cndls[i].v || 0;
+    const vol = cndls[i].v || 1;
     if (cndls[i].c > cndls[i - 1].c)      out[i] = out[i - 1] + vol;
     else if (cndls[i].c < cndls[i - 1].c) out[i] = out[i - 1] - vol;
     else                                   out[i] = out[i - 1];

@@ -8,6 +8,10 @@ import * as IND from './indicators.js';
 
 const LWC = window.LightweightCharts;
 
+// Lightweight Charts renders epoch times as UTC and has no timezone setting.
+// Shift every timestamp by the IST offset so the axis shows exchange time.
+const IST_OFF = 5.5 * 3600;
+
 const TF_LIST = [
   { label: '5s',  secs: 5 },   { label: '15s', secs: 15 },
   { label: '1m',  secs: 60 },  { label: '3m',  secs: 180 },
@@ -127,15 +131,17 @@ export class BotChart {
       const data = await r.json();
       if (Array.isArray(data)) {
         this.store.nifty.hist = data.map(c => (
-          { t: c.t, o: c.o, h: c.h, l: c.l, c: c.c, v: c.v || 0 }));
+          { t: c.t + IST_OFF, o: c.o, h: c.h, l: c.l, c: c.c, v: c.v || 0 }));
       }
     } catch (e) { /* no history (bad token / off-hours) — tick-only chart */ }
     this.render();
   }
 
-  onTick(source, price, tsSec) {
+  onTick(source, price, tsSec, cumVol = 0) {
     const st = this.store[source];
-    st.ticks.push({ t: tsSec, v: price });
+    // cumVol is the exchange's cumulative daily volume — candle volume is
+    // derived from the delta within each bucket in _buildCandles.
+    st.ticks.push({ t: tsSec + IST_OFF, v: price, cv: cumVol || 0 });
     if (st.ticks.length > 100000) st.ticks.splice(0, 50000);
     if (source === this.source) this._updateForming();
   }
@@ -161,12 +167,14 @@ export class BotChart {
       }
       if (cur && bucket === cur.t) {
         cur.h = Math.max(cur.h, tick.v); cur.l = Math.min(cur.l, tick.v); cur.c = tick.v;
+        cur.v = Math.max(0, (tick.cv || 0) - cur._cv0);   // cumulative-vol delta
       } else {
-        if (cur) candles.push(cur);
-        cur = { t: bucket, o: tick.v, h: tick.v, l: tick.v, c: tick.v, v: 0 };
+        if (cur) { delete cur._cv0; candles.push(cur); }
+        cur = { t: bucket, o: tick.v, h: tick.v, l: tick.v, c: tick.v,
+                v: 0, _cv0: tick.cv || 0 };
       }
     }
-    if (cur) candles.push(cur);
+    if (cur) { delete cur._cv0; candles.push(cur); }
     return candles;
   }
 
@@ -245,7 +253,7 @@ export class BotChart {
 
   addMarker(kind, tsSec, price, text) {
     this.markers.push({
-      time: Math.floor(tsSec / this.tf) * this.tf,
+      time: Math.floor((tsSec + IST_OFF) / this.tf) * this.tf,
       position: kind === 'buy' ? 'belowBar' : 'aboveBar',
       color: kind === 'buy' ? UP : DOWN,
       shape: kind === 'buy' ? 'arrowUp' : 'arrowDown',
@@ -261,30 +269,52 @@ export class BotChart {
   }
 
   // ── indicators ──────────────────────────────────────────────────────────
-  toggleOverlay(catalogId) {
+  toggleOverlay(catalogId, params = null) {
     if (this.overlays.has(catalogId)) {
       for (const s of this.overlays.get(catalogId).series) this.chart.removeSeries(s);
       this.overlays.delete(catalogId);
     } else {
       const cat = IND.IND_CATALOG.find(c => c.id === catalogId);
       if (!cat || cat.sub) return;
-      this.overlays.set(catalogId, { series: [], params: { ...cat.params } });
+      this.overlays.set(catalogId, { series: [], params: { ...cat.params, ...(params || {}) } });
     }
     this.render();
   }
 
-  setOscillator(catalogId) {
+  setOscillator(catalogId, params = null) {
     if (this.oscillator) {
       for (const s of this.oscillator.series) this.osc.removeSeries(s);
       this.oscillator = null;
     }
     if (catalogId) {
       const cat = IND.IND_CATALOG.find(c => c.id === catalogId);
-      if (cat) this.oscillator = { id: catalogId, series: [], params: { ...cat.params } };
+      if (cat) this.oscillator = { id: catalogId, series: [],
+                                   params: { ...cat.params, ...(params || {}) } };
     }
     this.oscEl.style.display = this.oscillator ? 'block' : 'none';
     this.render();
     return !!this.oscillator;
+  }
+
+  /** Live param update (period/mult/color…): rebuild the indicator's series
+   *  with the merged params and re-render. No-op if the indicator is off. */
+  setIndicatorParams(catalogId, params) {
+    const ov = this.overlays.get(catalogId);
+    if (ov) {
+      ov.params = { ...ov.params, ...params };
+      for (const s of ov.series) this.chart.removeSeries(s);
+      ov.series = [];
+      this.render();
+      return true;
+    }
+    if (this.oscillator && this.oscillator.id === catalogId) {
+      this.oscillator.params = { ...this.oscillator.params, ...params };
+      for (const s of this.oscillator.series) this.osc.removeSeries(s);
+      this.oscillator.series = [];
+      this.render();
+      return true;
+    }
+    return false;
   }
 
   _line(chart, color, width = 1) {
@@ -304,7 +334,8 @@ export class BotChart {
     for (const [id, ov] of this.overlays) {
       const p = ov.params;
       const need = n => {
-        while (ov.series.length < n) ov.series.push(this._line(this.chart, p.color));
+        // width 2 — 1px lines vanish among dense candles at full zoom-out
+        while (ov.series.length < n) ov.series.push(this._line(this.chart, p.color, 2));
         return ov.series;
       };
       switch (id) {

@@ -44,7 +44,12 @@
       "Bash(awk '{print $1}')",
       "Bash(powershell -Command 'Get-Process python -ErrorAction SilentlyContinue | Where-Object {\\($_.CommandLine -like '\\\\''*buy_app*'\\\\''\\)} | Stop-Process -Force')",
       "Bash(curl -s -m 2 -o /dev/null -w \"%{http_code}\" http://localhost:5001/)",
-      "PowerShell(Get-CimInstance *)"
+      "PowerShell(Get-CimInstance *)",
+      "Read(//c/Program Files \\\\\\(x86\\\\\\)/Microsoft/Edge/Application/**)",
+      "Read(//c/Program Files/Google/Chrome/Application/**)",
+      "Bash(npm i *)",
+      "Bash(curl -s -o /dev/null -w \"server: %{http_code}\\\\n\" http://localhost:5001/)",
+      "Bash(git rm *)"
     ]
   }
 }

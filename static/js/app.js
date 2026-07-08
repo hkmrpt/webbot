@@ -30,7 +30,10 @@ socket.on('state', d => {
   // chart feeds (client clock; server broadcasts are near-real-time)
   const now = Math.floor(Date.now() / 1000);
   if (d.nifty_price) chart.onTick('nifty', d.nifty_price, now);
-  if (d.trade_open && d.opt_price) chart.onTick('option', d.opt_price, now);
+  if (d.trade_open && d.opt_price) {
+    const optVol = d.active_side === 'PE' ? d.pe_volume : d.ce_volume;
+    chart.onTick('option', d.opt_price, now, optVol || 0);
+  }
 
   chart.setLevels({
     ref:   d.nifty_ref || 0,
@@ -172,10 +175,47 @@ document.getElementById('srcSeg').addEventListener('click', e => {
 document.getElementById('chartType').addEventListener('change',
   e => chart.setType(e.target.value));
 
-/* indicator dropdown */
+/* indicator dropdown — toggle + per-indicator param editor */
 const indMenu = document.getElementById('indMenu');
 const CATS = [['trend', 'Trend'], ['osc', 'Oscillators'],
               ['vol', 'Volatility'], ['volume', 'Volume']];
+
+// Edited params persist across toggle off/on (and localStorage across reloads)
+const paramStore = JSON.parse(localStorage.getItem('indParams') || '{}');
+const saveParams = () => localStorage.setItem('indParams', JSON.stringify(paramStore));
+const paramsFor = ind => ({ ...ind.params, ...(paramStore[ind.id] || {}) });
+
+function buildParamEditor(ind, host) {
+  host.innerHTML = '';
+  const current = paramsFor(ind);
+  for (const [key, defVal] of Object.entries(ind.params)) {
+    const row = document.createElement('label');
+    row.className = 'pp-row';
+    const isColor = key === 'color';
+    row.innerHTML = `<span>${key}</span>`;
+    const input = document.createElement('input');
+    if (isColor) {
+      input.type = 'color';
+      input.value = current[key] || defVal;
+    } else {
+      input.type = 'number';
+      input.step = Math.abs(defVal) < 1 ? '0.01' : '1';
+      input.min = '0';
+      input.value = current[key];
+    }
+    input.addEventListener('change', () => {
+      const v = isColor ? input.value : Number(input.value);
+      if (!isColor && (!isFinite(v) || v <= 0)) { input.value = current[key]; return; }
+      paramStore[ind.id] = { ...(paramStore[ind.id] || {}), [key]: v };
+      saveParams();
+      chart.setIndicatorParams(ind.id, { [key]: v });   // live if active
+    });
+    input.addEventListener('click', e => e.stopPropagation());
+    row.appendChild(input);
+    host.appendChild(row);
+  }
+}
+
 for (const [cat, label] of CATS) {
   const h = document.createElement('div');
   h.className = 'dd-cat'; h.textContent = label;
@@ -183,20 +223,37 @@ for (const [cat, label] of CATS) {
   for (const ind of IND_CATALOG.filter(i => i.cat === cat)) {
     const item = document.createElement('div');
     item.className = 'dd-item';
-    item.innerHTML = `<span class="sw"></span>${ind.name}${ind.sub ? ' <small>(pane)</small>' : ''}`;
+    item.innerHTML = `<span class="sw"></span><span class="dd-name">${ind.name}${ind.sub ? ' <small>(pane)</small>' : ''}</span>`;
+    if (Object.keys(ind.params).length) {
+      const gear = document.createElement('span');
+      gear.className = 'dd-gear';
+      gear.textContent = '⚙';
+      gear.title = 'Edit parameters';
+      gear.addEventListener('click', e => {
+        e.stopPropagation();
+        const open = !editor.classList.contains('hidden');
+        indMenu.querySelectorAll('.dd-params').forEach(p => p.classList.add('hidden'));
+        if (!open) { buildParamEditor(ind, editor); editor.classList.remove('hidden'); }
+      });
+      item.appendChild(gear);
+    }
     item.onclick = () => {
       if (ind.sub) {
         const on = chart.setOscillator(
-          chart.oscillator && chart.oscillator.id === ind.id ? null : ind.id);
+          chart.oscillator && chart.oscillator.id === ind.id ? null : ind.id,
+          paramsFor(ind));
         indMenu.querySelectorAll('.dd-item.osc-on').forEach(x =>
           x.classList.remove('on', 'osc-on'));
         if (on) item.classList.add('on', 'osc-on');
       } else {
-        chart.toggleOverlay(ind.id);
+        chart.toggleOverlay(ind.id, paramsFor(ind));
         item.classList.toggle('on', chart.overlays.has(ind.id));
       }
     };
     indMenu.appendChild(item);
+    const editor = document.createElement('div');
+    editor.className = 'dd-params hidden';
+    indMenu.appendChild(editor);
   }
 }
 document.getElementById('indBtn').addEventListener('click', e => {
@@ -254,3 +311,6 @@ document.getElementById('btnClearLog').addEventListener('click', P.clearLog);
 
 /* initial history load (populates the tab before first open) */
 loadHistory();
+
+/* debug/test handle (used by the headless UI probe) */
+window.__bot = { chart, socket, get state() { return lastState; } };

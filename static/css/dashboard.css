@@ -257,9 +257,22 @@ label { text-transform: uppercase; letter-spacing: .08em; color: var(--text2); f
   border-radius: var(--r2); cursor: pointer; font-size: 11px; }
 .dd-item:hover { background: var(--panel3); }
 .dd-item .sw { width: 8px; height: 8px; border-radius: 2px; background: var(--panel4);
-  border: 1px solid var(--border3); }
+  border: 1px solid var(--border3); flex-shrink: 0; }
 .dd-item.on .sw { background: var(--cyan); border-color: var(--cyan); }
 .dd-item.on { color: var(--cyan); }
+.dd-name { flex: 1; }
+.dd-gear { color: var(--text3); font-size: 12px; padding: 0 2px; }
+.dd-gear:hover { color: var(--amber); }
+.dd-params { padding: 4px 8px 8px 22px; display: flex; flex-direction: column;
+  gap: 4px; background: var(--panel2); border-radius: var(--r2); margin: 0 4px 4px; }
+.pp-row { display: flex; align-items: center; justify-content: space-between;
+  gap: 8px; font-size: 10px; color: var(--text2); text-transform: none;
+  letter-spacing: 0; }
+.pp-row input[type=number] { width: 64px; background: var(--panel3);
+  border: 1px solid var(--border2); color: var(--text); border-radius: 3px;
+  padding: 3px 6px; font-family: var(--mono); font-size: 10px; }
+.pp-row input[type=color] { width: 32px; height: 20px; padding: 0; border: none;
+  background: none; cursor: pointer; }
 
 /* ── Right panel ────────────────────────────────────────────────────────── */
 .rp-tabs { display: flex; border-bottom: 1px solid var(--border); }
