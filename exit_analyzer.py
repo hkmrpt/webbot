@@ -4,7 +4,7 @@ exit_analyzer.py  ──  Option Buy Robot v9
 
 Advanced AI/ML exit analysis engine.
 
-Analyzes 10 exit signals every tick and returns a composite exit decision:
+Analyzes 9 exit signals every tick and returns a composite exit decision:
 
   1. Volatility Spike Detection    — sudden ATR expansion = take profit or protect
   2. Price Action Reversal         — bearish/bullish engulfing, pin bars, double tops
@@ -15,7 +15,9 @@ Analyzes 10 exit signals every tick and returns a composite exit decision:
   7. Time Decay Pressure           — theta eats premium, urgent exit as time passes
   8. Trend Exhaustion              — RSI divergence, slope flattening
   9. Cascade Risk                  — rapid multi-tick drop = panic selling
-  10. Intelligent Trail            — ATR-adaptive, momentum-aware, regime-sensitive
+
+(The trailing stop itself lives in BuyExitStrategy and always outranks
+these signals, together with the hard SL and timeout.)
 
 Self-learning: learns from each trade what signals predicted profitable exits
 vs premature exits, and adjusts signal weights accordingly.
@@ -24,10 +26,26 @@ vs premature exits, and adjusts signal weights accordingly.
 import json
 import math
 import os
+import sys
 from collections import deque
 from datetime import datetime
 
+from config import AI_EXIT_MIN_TRADES
+
+# State dir anchored next to the module (or exe when frozen) so state never
+# silently lands in a different working directory. Tests may override.
+STATE_DIR = (os.path.dirname(os.path.abspath(sys.executable))
+             if getattr(sys, "frozen", False)
+             else os.path.dirname(os.path.abspath(__file__)))
+
 EXIT_ANALYZER_STATE = "exit_analyzer_state.json"
+
+
+def _state_path(mode: str = "") -> str:
+    if mode:
+        base, ext = os.path.splitext(EXIT_ANALYZER_STATE)
+        return os.path.join(STATE_DIR, f"{base}_{mode}{ext}")
+    return os.path.join(STATE_DIR, EXIT_ANALYZER_STATE)
 
 
 class SignalResult:
@@ -185,8 +203,12 @@ def _sig_profit_decay(profit_history: list, peak_pct: float) -> SignalResult:
         return SignalResult("profit_decay")
 
     recent = profit_history[-6:]
-    # Check if every tick shows declining profit
-    all_declining = all(recent[i] < recent[i - 1] for i in range(1, len(recent)))
+    # Non-increasing with a net decline — strict < on every tick would be
+    # silently disabled by a single tied print (prices are rounded to 2dp).
+    all_declining = (
+        all(recent[i] <= recent[i - 1] for i in range(1, len(recent)))
+        and recent[-1] < recent[0]
+    )
 
     if all_declining:
         decay_amount = recent[0] - recent[-1]
@@ -324,18 +346,35 @@ class ExitAnalyzer:
     SIGNAL_NAMES = [
         "vol_spike", "reversal_pattern", "momentum_collapse", "profit_decay",
         "volume_dryup", "gamma_trap", "time_pressure", "trend_exhaustion",
-        "cascade_risk", "adaptive_trail"
+        "cascade_risk",
     ]
 
     # Default urgency threshold: signal must be this urgent to trigger exit
     URGENCY_THRESHOLD = 0.55
 
-    def __init__(self):
+    def __init__(self, mode: str | None = None):
+        from config import TRADING_MODE
+        self._mode = mode or TRADING_MODE
         # Learned weights per signal (how reliable each signal is)
         self.weights = {s: 1.0 for s in self.SIGNAL_NAMES}
         self.n_trades = 0
         self.n_correct_exits = 0  # exits that saved from further loss
         self._last_signals: dict | None = None
+        # Signals snapshotted at the tick the analyzer DECIDED to exit —
+        # learning must credit these, not whatever fired on the final tick
+        # of an SL/trail/timeout exit the analyzer had nothing to do with.
+        self._fired_at_decision: dict | None = None
+        self._load()
+
+    def set_mode(self, mode: str):
+        """Switch demo/real state files (demo fills never train real weights)."""
+        if mode == self._mode:
+            return
+        self._save()
+        self._mode = mode
+        self.weights = {s: 1.0 for s in self.SIGNAL_NAMES}
+        self.n_trades = 0
+        self.n_correct_exits = 0
         self._load()
 
     def check(
@@ -350,7 +389,7 @@ class ExitAnalyzer:
         opt_price: float,
     ) -> tuple[bool, str]:
         """
-        Run all 10 exit signals. Returns (should_exit, reason).
+        Run all exit signals. Returns (should_exit, reason).
         """
         signals = {}
 
@@ -391,16 +430,26 @@ class ExitAnalyzer:
         # 9. Cascade risk
         signals["cascade_risk"] = _sig_cascade_risk(prices, entry)
 
-        # 10. Adaptive trail (not a signal — handled by BuyExitStrategy)
-        signals["adaptive_trail"] = SignalResult("adaptive_trail")
-
         self._last_signals = {k: {"fire": v.fire, "urgency": v.urgency} for k, v in signals.items()}
+
+        # ── Warmup gate ──────────────────────────────────────────────
+        # Until the analyzer has learned from AI_EXIT_MIN_TRADES closed
+        # trades, it has no exit authority — hard SL / trail / timeout
+        # protect the trade. Exception: cascade_risk stays live because it
+        # is a mechanical crash protector (4 accelerating drops), not a
+        # learned signal.
+        warmup = self.n_trades < AI_EXIT_MIN_TRADES
+        if warmup:
+            casc = signals["cascade_risk"]
+            if casc.fire and casc.urgency >= 0.85:
+                return self._decide(True, f"[EXIT-AI] {casc.reason}")
+            return False, ""
 
         # ── Composite decision ───────────────────────────────────────
         # Check for any critical signal (urgency >= 0.85)
         for name, sig in signals.items():
             if sig.fire and sig.urgency >= 0.85:
-                return True, f"[EXIT-AI] {sig.reason}"
+                return self._decide(True, f"[EXIT-AI] {sig.reason}")
 
         # Weighted urgency sum — if multiple signals fire, their combined weight matters
         weighted_urgency = 0
@@ -419,32 +468,56 @@ class ExitAnalyzer:
 
         # Multiple signals firing = stronger exit signal
         if fire_count >= 3 and weighted_urgency >= 1.5:
-            return True, f"[EXIT-AI] {fire_count} signals fired — {top_reason}"
+            return self._decide(True, f"[EXIT-AI] {fire_count} signals fired — {top_reason}")
 
-        # Strong single signal
-        if fire_count >= 1 and weighted_urgency >= self.URGENCY_THRESHOLD * max(self.weights.values()):
-            return True, f"[EXIT-AI] {top_reason}"
+        # Strong single signal: judged on ITS OWN learned weight. The old rule
+        # compared against max(all weights), so one well-trusted signal
+        # suppressed every unrelated signal in the book.
+        for name, sig in signals.items():
+            if sig.fire and sig.urgency * self.weights.get(name, 1.0) >= self.URGENCY_THRESHOLD:
+                return self._decide(True, f"[EXIT-AI] {sig.reason}")
 
         return False, ""
 
+    def _decide(self, fire: bool, reason: str) -> tuple[bool, str]:
+        """Snapshot the firing signals at DECISION time for attribution."""
+        if fire:
+            self._fired_at_decision = dict(self._last_signals or {})
+        return fire, reason
+
     def on_trade_closed(self, result: dict):
         """
-        Learn from trade: did the exit signals fire at the right time?
+        Learn from the trade — but ONLY when the analyzer actually caused the
+        exit. The old rule credited/blamed every signal that happened to fire
+        on the final tick even when the exit was an SL/trail/timeout the
+        analyzer had nothing to do with (no attribution).
         """
-        if self._last_signals is None:
+        fired = self._fired_at_decision
+        self._last_signals = None
+        self._fired_at_decision = None
+
+        # Mode isolation: never learn from a different trading mode's fills
+        if result.get("mode") and result["mode"] != self._mode:
+            return
+
+        # n_trades counts every closed trade — it gates the warmup, which
+        # should reflect total experience, not just AI-caused exits.
+        self.n_trades += 1
+
+        if result.get("reason") != "ai_analyzer" or not fired:
+            self._save()
             return
 
         pnl_pct = result.get("pnl_pct", 0) or 0
         peak_pct = result.get("peak_profit_pct", 0) or 0
-        reason = result.get("reason", "")
 
         # Good exit = didn't give back too much of peak profit
         gave_back = peak_pct - pnl_pct
         good_exit = pnl_pct >= 0 and (peak_pct < 2 or gave_back < peak_pct * 0.5)
 
         lr = 0.06
-        for name, sig_data in self._last_signals.items():
-            if sig_data["fire"]:
+        for name, sig_data in fired.items():
+            if sig_data["fire"] and name in self.weights:
                 if good_exit:
                     # Signal fired and exit was good → boost weight
                     self.weights[name] = min(3.0, self.weights[name] + lr)
@@ -452,11 +525,8 @@ class ExitAnalyzer:
                     # Signal fired but exit was premature → penalize
                     self.weights[name] = max(0.2, self.weights[name] - lr * 0.5)
 
-        self.n_trades += 1
         if good_exit:
             self.n_correct_exits += 1
-
-        self._last_signals = None
         self._save()
 
     @property
@@ -474,20 +544,24 @@ class ExitAnalyzer:
                 "n_trades": self.n_trades,
                 "n_correct_exits": self.n_correct_exits,
             }
-            with open(EXIT_ANALYZER_STATE, "w") as f:
+            with open(_state_path(self._mode), "w") as f:
                 json.dump(data, f, indent=2)
         except Exception:
             pass
 
     def _load(self):
-        if not os.path.exists(EXIT_ANALYZER_STATE):
+        if not os.path.exists(_state_path(self._mode)):
             return
         try:
-            with open(EXIT_ANALYZER_STATE) as f:
+            with open(_state_path(self._mode)) as f:
                 data = json.load(f)
             self.weights = data.get("weights", self.weights)
             self.n_trades = data.get("n_trades", 0)
             self.n_correct_exits = data.get("n_correct_exits", 0)
+            # Migration: drop retired signals (e.g. the old "adaptive_trail"
+            # placeholder), ensure current signals all have a weight.
+            self.weights = {k: v for k, v in self.weights.items()
+                            if k in self.SIGNAL_NAMES}
             for s in self.SIGNAL_NAMES:
                 if s not in self.weights:
                     self.weights[s] = 1.0

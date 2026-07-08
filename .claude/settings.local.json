@@ -23,7 +23,16 @@
       "Bash(mkdir -p /c/Users/hkmrp/PycharmProjects/webbot/algobot/logs)",
       "Bash(pip install:*)",
       "Bash(grep -h \"^from \\\\|^import \" *.py)",
-      "WebFetch(domain:iqoption.com)"
+      "WebFetch(domain:iqoption.com)",
+      "Bash(npm update:*)",
+      "Bash(claude --version)",
+      "Bash(npx @anthropic-ai/claude-code --version)",
+      "Bash(npm view:*)",
+      "Bash(rm \"C:/Users/hkmrp/.claude/projects/C--Users-hkmrp-PycharmProjects-webbot/memory/project_rewrite.md\")",
+      "Bash(mv \"C:/Users/hkmrp/.claude/projects/C--Users-hkmrp-PycharmProjects-webbot/memory/project_multistock.md\" \"C:/Users/hkmrp/.claude/projects/C--Users-hkmrp-PycharmProjects-webbot/memory/project_current_state.md\")",
+      "Bash(grep -n \"_no_new_high_count\\\\|else:$\" buy_exit_strategy.py)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)"
     ]
   }
 }

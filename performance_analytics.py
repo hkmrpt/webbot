@@ -15,10 +15,16 @@ Reads trade_log.csv and computes comprehensive performance metrics:
 import csv
 import os
 import math
+import sys
 from datetime import datetime
 from collections import defaultdict
 
-TRADE_LOG = "trade_log.csv"
+# Anchored next to the module (or exe when frozen) — a bare relative path
+# silently read from whatever cwd the process happened to have.
+_BASE_DIR = (os.path.dirname(os.path.abspath(sys.executable))
+             if getattr(sys, "frozen", False)
+             else os.path.dirname(os.path.abspath(__file__)))
+TRADE_LOG = os.path.join(_BASE_DIR, "trade_log.csv")
 
 
 def load_trades() -> list:

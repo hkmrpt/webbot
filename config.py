@@ -119,9 +119,10 @@ BUY_TRAIL_PCT       = 8.0          # tighter default trail
 # ── Profit-Tier Trail ─────────────────────────────────────────
 PROFIT_TRAIL_THRESHOLD_PCT = 2.0   # activate profit-tier trail earlier
 
+# Monotonic non-decreasing: small profit = tightest trail, large profit = widest.
 PROFIT_TIER_TRAIL = [
-    (2.0,   3.5),   # peak ≥ 2%  → trail 3.5% — lock small gains early
-    (4.0,   3.0),   # peak ≥ 4%  → trail 3.0% — tighten as profit grows
+    (2.0,   3.0),   # peak ≥ 2%  → trail 3.0% — lock small gains early
+    (4.0,   3.5),   # peak ≥ 4%  → trail 3.5% — a bit more room as profit grows
     (8.0,   4.0),   # peak ≥ 8%  → trail 4.0% — give room for continuation
     (15.0,  5.5),   # peak ≥ 15% → trail 5.5% — wide trail for runners
     (25.0,  7.0),   # peak ≥ 25% → trail 7.0% — very wide for big moves
@@ -148,17 +149,9 @@ TRAIL_TIME_TIGHTEN_SECS   = 45     # was 20 — tighten every 45s, not 20s
 TRAIL_TIME_TIGHTEN_STEP   = 1.0    # was 1.5 — gentler tightening per interval
 TRAIL_TIME_MIN_PCT        = 4.0    # was 3.0 — floor raised to avoid spread stops
 
-# ── Move Type Detection ───────────────────────────────────────
+# ── Move Type Detection (display-only chip on the dashboard) ──
 MOVE_VELOCITY_WINDOW   = 5         # ticks to measure velocity
 FAST_MOVE_VELOCITY     = 2.0       # avg pts/tick — above = fast move
-
-SLOW_MOVE_TRAIL_CAP    = 5.0       # trail cap on slow moves
-FAST_MOVE_TRAIL_FLOOR  = 12.0      # trail floor on fast moves
-
-SLOW_MOVE_TIMEOUT_SECS = 40        # exit slow moves faster
-SLOW_MOVE_MIN_PROFIT   = 0.5       # lower bar — even small profit is ok for slow moves
-FAST_MOVE_TIMEOUT_SECS = 90        # fast moves get more time but not too much
-FAST_MOVE_MIN_PROFIT   = 2.0       # expect at least 2% from fast moves
 
 # ── Timeout ───────────────────────────────────────────────────
 TRADE_TIMEOUT_SECS        = 50     # general timeout reduced
@@ -196,6 +189,18 @@ FORCE_EXIT_M        = 25
 
 # ── Trade Log ─────────────────────────────────────────────────
 TRADE_LOG           = "trade_log.csv"
+
+# ── Tick Recording (v9 redesign — backtest data foundation) ───
+TICK_RECORDING_ENABLED = True      # record every WS tick to ticks/ticks_YYYYMMDD.jsonl.gz
+TICK_DIR               = "ticks"
+
+# ── Expiry Day (NSE moved NIFTY weekly expiry Thursday → Tuesday in 2025)
+NIFTY_EXPIRY_WEEKDAY   = 1         # 0=Mon 1=Tue 2=Wed 3=Thu 4=Fri
+
+# ── Standing profit-target order (real mode) ─────────────────
+# After a real BUY fills, a standing LIMIT SELL is placed at
+# entry × (1 + pct/100). Scalp mode uses SCALP_TARGET_PCT instead.
+TARGET_LIMIT_PCT       = 2.5
 
 # ── Advanced Entry Filters (v8.5) ─────────────────────────────
 # Breakout filter — spike must clear the prior consolidation range
@@ -251,13 +256,31 @@ MAX_DRAWDOWN_PCT          = 5.0    # stop trading if down 5% from day start
 # This sizes the position so that 1 ATR move = MAX_RISK_PER_TRADE of capital
 ATR_POSITION_SIZING       = True   # True = ATR-based, False = max-capital
 
-# ── Intelligent Exit (v9) ────────────────────────────────────────────────────
-# Volume dry-up exit — exit when volume collapses mid-trade
-VOLUME_DRYUP_EXIT         = True
-VOLUME_DRYUP_RATIO        = 0.3    # current vol < 30% of avg → dry-up
-VOLUME_DRYUP_MIN_PROFIT   = 1.0    # only exit on dry-up if at least 1% profit
+# ── AI Exit Safety (v9 redesign) ─────────────────────────────────────────────
+# The AI exit analyzer / exit brain may only force exits after learning from
+# this many closed trades. Below the threshold, only the mechanical
+# cascade_risk crash protector stays live. Hard SL / trail / timeout always run.
+AI_EXIT_MIN_TRADES   = 10
 
-# Momentum stall exit — exit when price stalls after initial move
-MOMENTUM_STALL_EXIT       = True
-MOMENTUM_STALL_TICKS      = 8      # if price doesn't make new high for 8 ticks
-MOMENTUM_STALL_MIN_PROFIT = 1.5    # only if at least 1.5% profit
+# ExitBrain influence on the combined trail % is clamped to this factor range.
+# (Previously momentum_factor × learned multiplier could scale 0.25×–3.0×,
+#  silently defeating the trail ratchet and the tier table.)
+BRAIN_TRAIL_MIN_FACTOR = 0.7
+BRAIN_TRAIL_MAX_FACTOR = 1.3
+
+# ── Scalping Mode ────────────────────────────────────────────────────────────
+# Tight parameters for quick in-and-out trades capturing small movements.
+# Toggled from dashboard UI — overrides normal params when active.
+SCALP_SL_PHASE1_PCT       = 3.0    # tight initial SL
+SCALP_SL_PHASE2_PCT       = 2.0    # very tight phase-2 SL
+SCALP_SL_PHASE1_SECS      = 10     # tighten SL quickly
+SCALP_TRAIL_PCT           = 2.5    # tight trail to lock small gains
+SCALP_TIMEOUT_SECS        = 20     # exit fast if move doesn't materialise
+SCALP_COOLDOWN_SECS       = 5      # minimal cooldown — re-enter quickly
+SCALP_JUMP_MULTIPLIER     = 0.6    # lower spike threshold (60% of normal)
+SCALP_BREAKEVEN_PCT       = 1.0    # move SL to breakeven at just 1% profit
+SCALP_PROFIT_TRAIL_THRESHOLD = 1.0 # activate profit trail earlier
+SCALP_TARGET_PCT          = 2.0   # take profit target % for scalp trades
+SCALP_MICRO_MOVE_PCT      = 0.05  # min cumulative move % to qualify as micro-move
+SCALP_MICRO_CONSISTENCY   = 0.60  # 60% of ticks must go in same direction
+SCALP_MICRO_WINDOW        = 8     # ticks to evaluate micro-momentum

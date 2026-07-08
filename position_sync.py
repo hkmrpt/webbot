@@ -18,6 +18,8 @@ intelligently — even though the bot didn't place the original order.
 
 from datetime import datetime
 
+from config import LOT_SIZE
+
 
 def detect_open_positions(positions_data: dict, known_symbol: str = "") -> list:
     """
@@ -100,7 +102,12 @@ def build_adoption_params(position: dict) -> dict:
     """
     avg_price = position.get("avg_price", 0) or position.get("buy_price", 0)
     last_price = position.get("last_price", avg_price)
-    qty_lots = position.get("qty", 1)
+    # Zerodha reports quantity in UNITS (65 units = 1 NIFTY lot). The exit
+    # engine works in LOTS and multiplies by lot_size for P&L — passing units
+    # straight through inflated adopted-position P&L by lot_size×.
+    qty_units = position.get("qty", 1)
+    lot_size  = position.get("lot_size") or LOT_SIZE
+    qty_lots  = max(1, round(qty_units / lot_size)) if qty_units else 1
     side = position.get("side", "CE")
     pnl_pct = ((last_price - avg_price) / avg_price * 100) if avg_price > 0 else 0
 
@@ -132,6 +139,8 @@ def build_adoption_params(position: dict) -> dict:
         "entry_price":    avg_price,
         "current_price":  last_price,
         "qty_lots":       qty_lots,
+        "qty_units":      qty_units,
+        "lot_size":       lot_size,
         "pnl_pct":        round(pnl_pct, 2),
         "sl_pct_p1":      sl_pct,
         "sl_pct_p2":      max(4.0, sl_pct - 2.0),

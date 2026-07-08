@@ -56,7 +56,7 @@ let _activeStockSym = null;   // which stock is currently shown in the chart
 let candles = [], markers = [];
 let lastP = null, candleW = 10, viewOff = 0;
 let mX = -1, mY = -1, drag = false, dX = 0, dOff = 0;
-let lvl = { ref: 0, entry: 0, sl: 0, trail: 0 };
+let lvl = { ref: 0, entry: 0, sl: 0, trail: 0, tp: 0 };
 let bestTrade = null, worstTrade = null;
 
 // Config mirrors
@@ -891,7 +891,7 @@ function drawCross(mn, mx) {
 }
 function updateTags(mn, mx) {
   const niftyLvls  = [{ id:'tagRef',   price:lvl.ref   }];
-  const optionLvls = [{ id:'tagEntry', price:lvl.entry }, { id:'tagSL', price:lvl.sl }, { id:'tagTrail', price:lvl.trail }];
+  const optionLvls = [{ id:'tagEntry', price:lvl.entry }, { id:'tagSL', price:lvl.sl }, { id:'tagTrail', price:lvl.trail }, { id:'tagTP', price:lvl.tp }];
   const active = (chartMode === 'nifty' && !chartMode.startsWith('stock_')) ? niftyLvls
                : chartMode.startsWith('stock_') ? []
                : optionLvls;
@@ -1538,6 +1538,7 @@ function draw() {
     drawLevel(lvl.entry, 'rgba(0,212,255,.85)',  [8,4], mn, mx);
     drawLevel(lvl.sl,    'rgba(255,61,92,.85)',  [4,4], mn, mx);
     drawLevel(lvl.trail, 'rgba(255,176,32,.85)', [6,3], mn, mx);
+    drawLevel(lvl.tp,    'rgba(0,230,118,.85)',  [6,3], mn, mx);
   }
 
   // Main chart (candles/line/area)
@@ -2500,6 +2501,7 @@ socket.on('state', d => {
   document.getElementById('exitBtn').classList.toggle('show', !!d.trade_open);
   updateTradeCard(d);
   _updateAdoptUI(d);
+  _updateScalpUI(d);
 
   // Status bar
   const dot  = document.getElementById('sDot');
@@ -2539,7 +2541,7 @@ socket.on('nifty_atm_resolved', function(atm) {
 socket.on('trade_opened', d => {
   const t = Date.now() / 1000;
   markers.push({ type:'buy', side:d.side, price:d.entry, time:t });
-  lvl.entry = d.entry; lvl.sl = d.sl; lvl.trail = 0;
+  lvl.entry = d.entry; lvl.sl = d.sl; lvl.trail = 0; lvl.tp = 0;
   // v8.2: order_id patched in after real order placed
   if (d.order_id) {
     set('oidBuy', '▲ BUY: ' + d.order_id);
@@ -2552,7 +2554,7 @@ socket.on('trade_opened', d => {
 socket.on('trade_closed', d => {
   const t = Date.now() / 1000;
   markers.push({ type:'exit', price:d.exit_price, pnl:d.pnl, time:t });
-  lvl.entry = 0; lvl.sl = 0; lvl.trail = 0;
+  lvl.entry = 0; lvl.sl = 0; lvl.trail = 0; lvl.tp = 0;
   if (bestTrade  === null || d.pnl > bestTrade)  bestTrade  = d.pnl;
   if (worstTrade === null || d.pnl < worstTrade) worstTrade = d.pnl;
   set('stBest',  bestTrade  !== null ? (bestTrade  >=0?'+':'')+'₹'+bestTrade.toFixed(2)  : '--');
@@ -2847,7 +2849,7 @@ function toggleRobot() {
 
     // Reset local state
     markers=[]; lastP=null; logInit=false;
-    lvl={ref:0,entry:0,sl:0,trail:0};
+    lvl={ref:0,entry:0,sl:0,trail:0,tp:0};
     bestTrade=null; worstTrade=null;
     niftyHist=[]; optHist=[]; candles=[];
     lastSkipReason=null;
@@ -2962,6 +2964,45 @@ function _updateAdoptUI(d) {
     if (dot) dot.className = 'adopt-dot active';
     const ap = d.adopted_position;
     if (msg) msg.textContent = 'Managing: ' + (ap.symbol || '?') + ' (' + (ap.side || '?') + ')';
+  }
+}
+
+// ── Scalp Mode (OFF / AUTO / MANUAL) ────────────────────────
+function setScalpMode(mode) {
+  socket.emit('toggle_scalp_mode', { mode: mode });
+}
+
+function scalpBuy(side) {
+  if (!confirm('Scalp BUY ' + side + ' at market price?')) return;
+  socket.emit('scalp_manual_buy', { side: side });
+}
+
+function _updateScalpUI(d) {
+  const mode = d.scalp_mode || 'off';
+  const pills = { off: 'scalpOff', auto: 'scalpAuto', manual: 'scalpManual' };
+  Object.entries(pills).forEach(([m, id]) => {
+    const el = document.getElementById(id);
+    if (el) el.classList.toggle('active', m === mode);
+  });
+  const status = document.getElementById('scalpStatus');
+  const dot = document.getElementById('scalpDot');
+  const manBtns = document.getElementById('scalpManualBtns');
+  const isActive = mode !== 'off';
+  if (status) status.style.display = isActive ? 'flex' : 'none';
+  if (dot) dot.className = isActive ? 'adopt-dot active' : 'adopt-dot off';
+  if (manBtns) manBtns.style.display = mode === 'manual' ? 'flex' : 'none';
+  // Update scalp status message
+  const msg = document.getElementById('scalpMsg');
+  if (msg) {
+    if (mode === 'auto') msg.textContent = 'Scalp AUTO: AI micro-move entry, SL=3% Trail=2.5%';
+    else if (mode === 'manual') msg.textContent = 'Scalp MANUAL: use Buy CE/PE, AI manages exit';
+    else msg.textContent = '';
+  }
+  // Update TP level from broadcast
+  if (d.scalp_tp != null && d.scalp_tp > 0) {
+    lvl.tp = d.scalp_tp;
+  } else {
+    lvl.tp = 0;
   }
 }
 

@@ -16,13 +16,27 @@ python buy_app.py           # starts server at http://0.0.0.0:5001
 - Main dashboard: `/` (buy_index.html)
 - Settings panel: `/settings` (buy_settings.html)
 
+**Automated tests** (pure logic — exit engine, gates, indicators, ML math, replay):
+```bash
+python -m pytest tests/
+```
+
+**Replay/backtest** — runs the exact strategy code over recorded ticks
+(`ticks/ticks_YYYYMMDD.jsonl.gz`, recorded automatically while the app runs):
+```bash
+python -m replay.replay --date 20260708 [--config overrides.json] [--slippage-bps 5]
+```
+Output (isolated in `replay_out/run_*/`): trade_log.csv + report.json (win rate,
+profit factor, max drawdown, per-reason/per-regime breakdowns). Replay never
+touches live ML state or the live trade log.
+
 **Test order placement directly:**
 ```bash
 python Zerodha_api.py buy NIFTY25APR26200CE 1
 python Zerodha_api.py sell NIFTY25APR26200CE 1
 ```
 
-There are no automated tests. Manual testing requires Zerodha credentials and market hours (9:25 AM–3:00 PM IST).
+Live manual testing requires Zerodha credentials and market hours (9:15 AM–3:30 PM IST).
 
 ## Architecture
 
@@ -69,10 +83,21 @@ All trading parameters live here. Key settings:
 The v8.1 refactor fixed deadlocks. The invariant must be preserved:
 
 1. **`_state_lock` covers state mutation ONLY** — acquire lock, read/mutate `S`/`RC`, collect order intent, release lock
-2. **All I/O happens after lock release** — `socketio.emit`, `place_buy()`, `place_sell()`, any network call
+2. **All I/O happens after lock release** — `_emitter.emit`, `place_buy()`, `place_sell()`, any network call. Functions called under the lock return deferred log lists (or append to `S["_deferred_logs"]`) instead of calling `log()`.
 3. **Write order results back** under a fresh lock acquire
 
 Violating this pattern (doing I/O inside the lock) will cause deadlocks. `_csv_lock` is a separate lock for CSV writes.
+
+## Core Invariants (v9.5 redesign)
+
+- **Exit precedence** (`buy_exit_strategy.py`): hard SL → trail → partial booking → timeout → AI analyzer → brain decay. Learned signals can NEVER outrank the hard SL. AI exits are warmup-gated (`AI_EXIT_MIN_TRADES`); only the mechanical `cascade_risk` crash protector is live untrained.
+- **Trail ratchet** is applied AFTER the ExitBrain adjustment (clamped 0.7–1.3×) — once tightened, the trail never widens. `PROFIT_TIER_TRAIL` must stay monotonic (tested).
+- **Every entry path passes `_entry_gates_ok()`** — including manual scalp buys.
+- **Time** comes from `core/clock.py` (naive IST, injectable) — never `datetime.now()`.
+- **Seams**: `core/broker.py` (Real/Paper), `core/emitter.py` (SocketIO/Null), `core/clock.py`. The replay harness (`replay/replay.py`) drives the real `process_ticks` through these.
+- **ML state is mode-tagged** (`*_demo.json` / `*_real.json`) — demo fills never train real-money weights. Engines skip learning when `result["mode"]` mismatches.
+- **Trade log v2**: every close AND partial booking writes an ML-joinable row (entry scores, regime, mode, NIFTY levels) to the anchored `trade_log.csv`.
+- **Tick recording** is always on (`TICK_RECORDING_ENABLED`) — `ticks/ticks_YYYYMMDD.jsonl.gz` is the backtest data foundation.
 
 ## Broadcast System
 

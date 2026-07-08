@@ -93,6 +93,11 @@ from config import (
     ATR_POSITION_SIZING, MAX_RISK_PER_TRADE,
     LOSS_STREAK_REDUCE_AFTER, LOSS_STREAK_SIZE_MULT,
     MAX_DRAWDOWN_PCT,
+    SCALP_SL_PHASE1_PCT, SCALP_SL_PHASE2_PCT, SCALP_SL_PHASE1_SECS,
+    SCALP_TRAIL_PCT, SCALP_TIMEOUT_SECS, SCALP_COOLDOWN_SECS,
+    SCALP_JUMP_MULTIPLIER, SCALP_BREAKEVEN_PCT, SCALP_PROFIT_TRAIL_THRESHOLD,
+    SCALP_MICRO_MOVE_PCT, SCALP_MICRO_CONSISTENCY, SCALP_MICRO_WINDOW,
+    SCALP_TARGET_PCT,
 )
 from buy_exit_strategy import BuyExitStrategy
 from market_brain import MarketBrain
@@ -153,6 +158,27 @@ _vix_tracker     = VIXTracker()         # India VIX live tracking
 _oi_analyzer     = OptionChainAnalyzer() # option chain OI/PCR analysis
 _mtf_analyzer    = MultiTimeframeAnalyzer() # multi-timeframe trend
 _vol_detector    = VolatilityDetector()
+
+# Injectable IST clock (core/clock.py) — session gates, cooldowns and SL
+# phases must not depend on the host timezone, and replay needs a sim clock.
+from core.clock import now as _cnow
+
+# Pluggable event sink (core/emitter.py) — live installs SocketIO below;
+# the replay harness installs a NullEmitter to run this file headless.
+from core import emitter as _emitter
+_emitter.set_emitter(lambda ev, p: socketio.emit(ev, p, namespace="/"))
+
+# Order-execution seam — RealBroker (Zerodha) / PaperBroker (instant fills)
+from core.broker import get_broker
+
+# Incremental O(1)-per-tick indicators (Stage 4 hot-path optimisation)
+from engine.indicators import RollingSlope, RollingATR
+
+# Tick recorder — every decoded WS tick lands in ticks/ticks_YYYYMMDD.jsonl.gz
+# for the replay/backtest harness. Hot-path cost: one queue.put_nowait.
+from replay.recorder import TickRecorder
+from config import TICK_RECORDING_ENABLED, TICK_DIR, TARGET_LIMIT_PCT
+_recorder = TickRecorder(TICK_DIR, TICK_RECORDING_ENABLED)
 
 # Separate lock for the log buffer so logging never blocks trading state.
 _log_lock = threading.Lock()
@@ -278,7 +304,7 @@ S = {
     "adopted_position":   None,           # externally-opened position being managed
     "_last_positions":    [],             # last positions snapshot for change detection
     "_pos_sync_ts":       0,              # timestamp of last position sync
-    "trading_date":       datetime.now().date(),   # for auto daily reset
+    "trading_date":       _cnow().date(),   # for auto daily reset
     "capital":            CAPITAL,
     "day_start_capital":  CAPITAL,               # capital at start of this trading day
 
@@ -287,6 +313,8 @@ S = {
     "target_order_id":    None,   # standing LIMIT SELL at +2.5%
 
     "exit_engine":        BuyExitStrategy(capital=CAPITAL),
+
+    "scalp_mode":         "off",          # scalping mode: "off" | "auto" | "manual"
 
     "index_token":        NIFTY_TOKEN,    # switchable: NIFTY_TOKEN or BANKNIFTY_TOKEN
     "index_name":         "NIFTY",        # display name for the selected index
@@ -314,13 +342,13 @@ def _active_slot():
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 def log(msg, level="info"):
-    ts    = datetime.now().strftime("%H:%M:%S")
+    ts    = _cnow().strftime("%H:%M:%S")
     entry = {"ts": ts, "msg": msg, "level": level}
     with _log_lock:
         S["logs"].append(entry)
         if len(S["logs"]) > 300:
             S["logs"] = S["logs"][-300:]
-    socketio.emit("log", entry, namespace="/")
+    _emitter.emit("log", entry)
 
 
 # ── Maths ─────────────────────────────────────────────────────────────────────
@@ -370,7 +398,7 @@ def _fetch_historical_daily_atr():
         enctoken = _up.unquote(cfg.get("enctoken", ""))
         user_id = cfg.get("user_id", "")
         token = S.get("index_token", NIFTY_TOKEN)
-        today = datetime.now()
+        today = _cnow()
         from_date = (today - timedelta(days=HIST_ATR_DAYS + 5)).strftime("%Y-%m-%d")
         to_date = (today - timedelta(days=1)).strftime("%Y-%m-%d")
 
@@ -406,8 +434,11 @@ def _fetch_historical_daily_atr():
         avg_range = sum(daily_ranges) / len(daily_ranges)
         threshold = avg_range * HIST_ATR_SPIKE_FRACTION
 
-        _hist_daily_atr = round(avg_range, 2)
-        _hist_spike_threshold = round(threshold, 2)
+        # Written from a background thread — publish under the state lock so
+        # readers (_update_jump_threshold, payload) never see a torn update.
+        with _state_lock:
+            _hist_daily_atr = round(avg_range, 2)
+            _hist_spike_threshold = round(threshold, 2)
 
         # Feed daily candles to market intelligence
         daily_candles = [{
@@ -437,7 +468,11 @@ def _update_jump_threshold(nifty_price):
     Primary: live tick-to-tick ATR × multiplier (e.g. 5 pts ATR × 1.2 = 6 pts)
     Historical daily range is used ONLY to set an intelligent ceiling.
     """
-    atr = _compute_atr(list(S["nifty_atr_ticks"]))
+    ind_a = S.get("_atr_ind")
+    if ind_a is not None and len(ind_a) > 0:
+        atr = round(ind_a.atr(), 3)
+    else:
+        atr = _compute_atr(list(S["nifty_atr_ticks"]))
     S["jump_atr"] = atr
 
     # PRIMARY: live tick ATR — this is what actually happens tick-to-tick
@@ -461,7 +496,7 @@ def _update_jump_threshold(nifty_price):
 
     # ── Intelligent multiplier ───────────────────────────────────────
     try:
-        intel_ctx = _market_intel.get_context()
+        intel_ctx = _intel_context()
         day_info = intel_ctx.get("day_info", {})
         day_type = day_info.get("day_type", "normal")
         regime = S.get("ai_regime", "unknown")
@@ -490,7 +525,7 @@ def _update_jump_threshold(nifty_price):
             mult *= 1.15
 
         # Session time
-        now = datetime.now()
+        now = _cnow()
         mins = now.hour * 60 + now.minute
         if mins < 9 * 60 + 30:
             mult *= 1.2
@@ -508,8 +543,9 @@ def _update_jump_threshold(nifty_price):
                 mult *= 0.75
 
         pts = round(pts * mult, 2)
-    except Exception:
-        pass
+    except Exception as exc:
+        # Never call log() here (we're under _state_lock) — app.logger only.
+        app.logger.warning(f"jump-threshold intel multiplier failed: {exc}")
 
     # Final clamp — tick-to-tick spike should be 2-20 pts max for NIFTY
     pts = max(RC["jump_min_pts"], min(20.0, pts))
@@ -517,6 +553,66 @@ def _update_jump_threshold(nifty_price):
     S["jump_threshold"]   = pts
     S["dynamic_jump_pts"] = pts
     return pts
+
+
+# ── Market-intel context memo ─────────────────────────────────────────────────
+# get_context (which runs compute_trade_budget) was recomputed up to 3× per
+# tick: jump threshold, entry gates, payload. 1 s TTL, keyed by session stats.
+_intel_cache: dict = {}
+_INTEL_TTL = 1.0
+
+
+def _intel_context(stats: dict | None = None) -> dict:
+    """Memoized _market_intel.get_context(). Must be called under _state_lock."""
+    key = "nostats" if stats is None else (
+        stats.get("trades_today"), stats.get("wins"), stats.get("losses"),
+        round(stats.get("session_pnl", 0) or 0, 2),
+        stats.get("loss_streak"), stats.get("max_trades_cap"),
+    )
+    nowt = _time.time()
+    ent = _intel_cache.get(key)
+    if ent and nowt - ent[0] < _INTEL_TTL:
+        return ent[1]
+    ctx = _market_intel.get_context(stats)
+    if len(_intel_cache) > 8:
+        _intel_cache.clear()
+    _intel_cache[key] = (nowt, ctx)
+    return ctx
+
+
+def _ingest_index_tick(price, *, full: bool = True):
+    """
+    Single index-tick ingestion pipeline. Must be called under _state_lock.
+    Previously triplicated across the active tick path, the idle path and the
+    REST poller (which let REST prices contaminate the WS tick series).
+
+    full=True  → complete pipeline (detectors, ATR, regression, threshold)
+    full=False → display-only update (price + tick buffer)
+    """
+    S["nifty_price"] = price
+    S["nifty_ticks"].append(price)
+    if not full:
+        return
+    S["nifty_tick_times"].append(_cnow())
+    _vol_detector.add(price)
+    _mtf_analyzer.add_tick(price)
+    S["nifty_atr_ticks"].append(price)
+    # Incremental O(1) indicators (engine/indicators.py) — replaces the full
+    # np.polyfit + mean-|Δ| recomputes that ran per tick under the lock.
+    ind_s = S.get("_slope_ind")
+    if ind_s is not None:
+        ind_s.push(price)
+        S["_atr_ind"].push(price)
+        # Same warmup gate as the original batch computation: no slope until
+        # regression_window ticks exist.
+        S["regression_slope"] = (ind_s.slope()
+                                 if len(ind_s) >= RC["regression_window"] else None)
+    else:
+        S["regression_slope"] = _regression_slope(list(S["nifty_ticks"]))
+    _update_jump_threshold(price)
+    # Keep the exit engine's market context fresh so close results
+    # can record the NIFTY level at exit (CSV v2: nifty_exit).
+    S["exit_engine"].market_ctx["nifty"] = price
 
 
 def _compute_rsi(prices, period=14):
@@ -550,7 +646,7 @@ def _check_spike_speed(current_price):
     ticks = list(S["nifty_ticks"])
     if len(ticks) < 3 or len(times) < 3:
         return True, ""
-    now = datetime.now()
+    now = _cnow()
     lookback = RC.get("spike_lookback_secs", SPIKE_LOOKBACK_SECS)
     cutoff = now - timedelta(seconds=lookback)
     start_idx = 0
@@ -630,6 +726,9 @@ def _breakout_filter_ok(current_price):
 
 
 def _adaptive_confirm_ticks(side):
+    """Called under _state_lock — returns (ticks, label). The caller must
+    defer the label to its log list; calling log() here would emit via
+    SocketIO while holding _state_lock (the v8.1 deadlock pattern)."""
     hist = list(_slot(side)["price_history"])
     atr  = _compute_option_atr(hist)
     if atr is None:
@@ -640,8 +739,7 @@ def _adaptive_confirm_ticks(side):
         ticks, label = RC["confirm_ticks_slow"], f"SLOW({RC['confirm_ticks_slow']}) — ATR={atr:.2f} low"
     else:
         ticks, label = RC["confirm_ticks_mid"], f"MID({RC['confirm_ticks_mid']}) — ATR={atr:.2f} normal"
-    log(f"Adaptive confirm: {label}", "info")
-    return ticks
+    return ticks, f"Adaptive confirm: {label}"
 
 
 # ── State payload builder ─────────────────────────────────────────────────────
@@ -660,7 +758,7 @@ def _build_state_payload():
 
     cdrem = 0
     if S["cooldown_until"]:
-        diff  = (S["cooldown_until"] - datetime.now()).total_seconds()
+        diff  = (S["cooldown_until"] - _cnow()).total_seconds()
         cdrem = max(0, int(diff))
 
     ce_slot = S["slots"]["CE"]
@@ -683,9 +781,7 @@ def _build_state_payload():
         "hist_daily_atr":       _hist_daily_atr,
         "hist_spike_threshold": _hist_spike_threshold,
         "threshold_source":     S.get("_threshold_source", "live_atr"),
-        "vix":                  _vix_tracker.score(),
-        "option_chain":         _oi_analyzer.state,
-        "multi_tf":             _mtf_analyzer.analyze("CE") if S.get("nifty_ticks") else {},
+        **_payload_slow(),
 
         "ce_token":             ce_slot["token"],
         "ce_strike":            ce_slot["strike"],
@@ -727,7 +823,7 @@ def _build_state_payload():
         "live_pnl":             live_pnl,
 
         "entry":                snap.get("entry"),
-        "target_price":         round(snap["entry"] * 1.025, 2) if snap.get("entry") and S["target_order_id"] else None,
+        "target_price":         round(snap["entry"] * (1 + _target_pct() / 100), 2) if snap.get("entry") and S["target_order_id"] else None,
         "sl":                   snap.get("sl"),
         "sl_pct":               snap.get("sl_pct"),
         "qty":                  snap.get("qty"),
@@ -770,37 +866,72 @@ def _build_state_payload():
         "force_exit_time":      f"{RC['force_exit_h']:02d}:{RC['force_exit_m']:02d}",
         "ai_entry_score":       S.get("ai_entry_score"),
         "ai_regime":            S.get("ai_regime", "unknown"),
-        "ai_brain":             _market_brain.state,
-        "entry_analyzer":       _entry_analyzer.state,
         "entry_verdict":        S.get("entry_verdict"),
-        "market_intel":         _market_intel.state,
         "adopted_position":     S.get("adopted_position"),
-        "trade_budget":         _market_intel.get_context({
-            "trades_today": S["trades_today"], "wins": S["wins"],
-            "losses": S["losses"], "session_pnl": S["session_pnl"],
-            "loss_streak": S.get("loss_streak", 0), "capital": S["capital"],
-            "day_start_capital": S["day_start_capital"],
-        }).get("trade_budget", {}),
 
         # New config constants for UI display
         "breakeven_trigger_pct": BREAKEVEN_TRIGGER_PCT,
         "nifty_reversal_exit":   NIFTY_REVERSAL_EXIT,
         "fast_move_velocity":    FAST_MOVE_VELOCITY,
+        "scalp_mode":            S["scalp_mode"],
+        "scalp_tp":              round(snap["entry"] * (1 + SCALP_TARGET_PCT / 100), 2) if snap.get("entry") and S["scalp_mode"] != "off" else None,
 
         "nifty_atm":            S.get("nifty_atm"),
         "atm_pending":          S.get("atm_pending", False),
-        "rsi":                  _compute_rsi(list(S["nifty_ticks"])),
-        "range_position":       _session_range_position(list(S["nifty_ticks"])),
-        "vol_detector":         _vol_detector.range_info(),
     }
 
 
+# ── Slow payload sub-dict (TTL-cached) ────────────────────────────────────────
+# These keys run real analytics (multi-TF trend rebuild, ML engine state,
+# adaptive trade budget, RSI, range scans). Building them on EVERY tick under
+# the lock was the largest steady-state cost in the app. The dashboard only
+# refreshes ~1×/s, so a 1 s cache is invisible to the UI (keys unchanged).
+_slow_payload_cache = {"ts": 0.0, "data": None}
+_SLOW_PAYLOAD_TTL   = 1.0
+
+
+def _payload_slow() -> dict:
+    """Must be called under _state_lock."""
+    nowt = _time.time()
+    if (_slow_payload_cache["data"] is not None
+            and nowt - _slow_payload_cache["ts"] < _SLOW_PAYLOAD_TTL):
+        return _slow_payload_cache["data"]
+    ticks = list(S["nifty_ticks"])
+    data = {
+        "vix":            _vix_tracker.score(),
+        "option_chain":   _oi_analyzer.state,
+        "multi_tf":       _mtf_analyzer.analyze("CE") if ticks else {},
+        "ai_brain":       _market_brain.state,
+        "entry_analyzer": _entry_analyzer.state,
+        "market_intel":   _market_intel.state,
+        "trade_budget":   _intel_context(_session_stats()).get("trade_budget", {}),
+        "rsi":            _compute_rsi(ticks),
+        "range_position": _session_range_position(ticks),
+        "vol_detector":   _vol_detector.range_info(),
+    }
+    _slow_payload_cache["ts"]   = nowt
+    _slow_payload_cache["data"] = data
+    return data
+
+
 # ── Broadcast ─────────────────────────────────────────────────────────────────
-def broadcast():
+# Tick-path broadcasts are rate-limited; trade lifecycle events and UI
+# handlers pass throttle=False for immediate updates. The 1 s periodic
+# broadcaster is the freshness floor.
+_BCAST_MIN_INTERVAL = 0.3
+_last_bcast_ts = 0.0
+
+
+def broadcast(throttle: bool = False):
     """Build state snapshot under the lock, emit outside it."""
+    global _last_bcast_ts
+    nowt = _time.time()
+    if throttle and nowt - _last_bcast_ts < _BCAST_MIN_INTERVAL:
+        return
+    _last_bcast_ts = nowt
     with _state_lock:
         payload = _build_state_payload()
-    socketio.emit("state", payload, namespace="/")
+    _emitter.emit("state", payload)
 
 
 # ── Order intent executor ─────────────────────────────────────────────────────
@@ -830,10 +961,12 @@ def _run_order_intent(intent, opened_payload=None, closed_payload=None):
         log("⚠ No tradingsymbol for real order", "error")
         return None
 
+    broker = get_broker(S["trading_mode"])
+
     if S["trading_mode"] == "real":
         if action == "buy":
             log(f"📡 REAL BUY — {symbol}  qty={qty}", "warning")
-            oid, err = place_buy(symbol, qty)
+            oid, err = broker.place_buy(symbol, qty)
 
             if oid:
                 with _state_lock:
@@ -843,16 +976,20 @@ def _run_order_intent(intent, opened_payload=None, closed_payload=None):
                 if opened_payload:
                     opened_payload["order_id"] = oid
 
-                # ── Place standing LIMIT SELL at entry + 2.5% ─────────────
+                # ── Place standing LIMIT SELL at the configured target ────
+                # TARGET_LIMIT_PCT normally; SCALP_TARGET_PCT in scalp mode —
+                # so the displayed target and the actual order always agree.
                 entry_price = intent.get("entry_price")
                 if entry_price and entry_price > 0:
-                    target_price = round(entry_price * 1.025, 2)
-                    t_oid, t_err = place_limit_sell(symbol, qty, target_price)
+                    with _state_lock:
+                        tgt_pct = _target_pct()
+                    target_price = round(entry_price * (1 + tgt_pct / 100), 2)
+                    t_oid, t_err = broker.place_limit_sell(symbol, qty, target_price)
                     if t_oid:
                         with _state_lock:
                             S["target_order_id"] = t_oid
                         log(
-                            f"🎯 Target SELL placed — ₹{target_price:.2f} (+2.5%)  "
+                            f"🎯 Target SELL placed — ₹{target_price:.2f} (+{tgt_pct}%)  "
                             f"order_id={t_oid}",
                             "success",
                         )
@@ -871,7 +1008,7 @@ def _run_order_intent(intent, opened_payload=None, closed_payload=None):
                 S["target_order_id"] = None
 
             if target_oid:
-                ok, c_err = cancel_order(target_oid)
+                ok, c_err = broker.cancel_order(target_oid)
                 if ok:
                     log(f"🗑 Target order cancelled — order_id={target_oid}", "info")
                 else:
@@ -879,7 +1016,7 @@ def _run_order_intent(intent, opened_payload=None, closed_payload=None):
                     log(f"⚠ Cancel target order failed ({c_err}) — may already be filled", "warning")
 
             log(f"📡 REAL SELL — {symbol}  qty={qty}", "warning")
-            oid, err = place_sell(symbol, qty)
+            oid, err = broker.place_sell(symbol, qty)
 
             if oid:
                 with _state_lock:
@@ -892,7 +1029,15 @@ def _run_order_intent(intent, opened_payload=None, closed_payload=None):
             return oid
 
     else:
-        log(f"🔵 DEMO — no real {'buy' if action == 'buy' else 'sell'} placed", "info")
+        # Paper broker: instant fill recorded to its ledger (replay stats).
+        # Behaviour matches the old demo mode — no order ids surface in state.
+        if action == "buy":
+            px = intent.get("entry_price")
+            oid, _err = broker.place_buy(symbol, qty, px)
+        else:
+            px = (closed_payload or {}).get("exit_price")
+            oid, _err = broker.place_sell(symbol, qty, px)
+        log(f"🔵 PAPER {action.upper()} — {symbol}  qty={qty}  [{oid}]", "info")
         return None
 
 
@@ -908,10 +1053,12 @@ def process_ticks(ticks):
             price = tick.get("last_price")
             if price is None:
                 continue
+            if not S.get("_replay"):
+                _recorder.record(token, price, tick.get("volume_traded") or 0)
             with _state_lock:
                 if token == NIFTY_TOKEN or token == S.get("index_token"):
-                    S["nifty_price"] = price
-                    S["nifty_ticks"].append(price)
+                    _ingest_index_tick(price, full=False)
+                    S["last_ws_tick_ts"] = _time.time()
                     # Auto-resolve ATM if not yet resolved
                     if not S.get("nifty_atm") and not S.get("_idle_atm_pending"):
                         S["_idle_atm_pending"] = True
@@ -930,7 +1077,7 @@ def process_ticks(ticks):
                 with _state_lock:
                     S["_idle_atm_pending"] = False
             threading.Thread(target=_idle_resolve, daemon=True).start()
-        broadcast()
+        broadcast(throttle=True)
         return
 
     trade_opened_payload = None
@@ -946,47 +1093,60 @@ def process_ticks(ticks):
         if price is None:
             continue
 
+        if not S.get("_replay"):
+            _recorder.record(token, price, volume)
+
         with _state_lock:
             if token == NIFTY_TOKEN or token == S["index_token"]:
-                S["nifty_price"] = price
-                S["nifty_ticks"].append(price)
-                S["nifty_tick_times"].append(datetime.now())
-                _vol_detector.add(price)
-                _mtf_analyzer.add_tick(price)
-                S["nifty_atr_ticks"].append(price)
-                S["regression_slope"] = _regression_slope(list(S["nifty_ticks"]))
-                _update_jump_threshold(price)
+                _ingest_index_tick(price)
+                S["last_ws_tick_ts"] = _time.time()
 
                 # ── Auto-resolve ATM on first tick ────────────────────────────
-                if S.get("atm_pending") and S["running"]:
+                # _atm_resolving is the single in-flight guard for BOTH the
+                # resolve and roll threads (the old atm_pending flag toggling
+                # raced between the two spawn paths).
+                if (S.get("atm_pending") and S["running"]
+                        and not S.get("_atm_resolving")
+                        and not S.get("_replay")):
+                    S["_atm_resolving"] = True
+                    S["atm_pending"]    = False
                     _snap_price = price
                     def _do_resolve(p=_snap_price):
-                        atm = _resolve_nifty_atm(p)
-                        if atm:
-                            _apply_nifty_atm(atm)
-                        else:
-                            log("⚠ ATM resolve failed — retry next tick", "warning")
+                        try:
+                            atm = _resolve_nifty_atm(p)
+                            if atm:
+                                _apply_nifty_atm(atm)
+                            else:
+                                log("⚠ ATM resolve failed — retry next tick", "warning")
+                                with _state_lock:
+                                    S["atm_pending"] = True   # retry
+                        finally:
                             with _state_lock:
-                                S["atm_pending"] = True   # retry
-                    S["atm_pending"] = False   # prevent re-triggering until thread finishes
+                                S["_atm_resolving"] = False
                     threading.Thread(target=_do_resolve, daemon=True).start()
 
                 # ── Auto-roll ATM when NIFTY drifts ≥ 50 pts from current strike ──
                 atm_info = S.get("nifty_atm")
                 if (S["running"] and not S["trade_open"]
-                        and atm_info and not S.get("atm_pending")):
+                        and atm_info and not S.get("atm_pending")
+                        and not S.get("_atm_resolving")
+                        and not S.get("_replay")):
                     current_strike = atm_info.get("strike", 0)
                     if current_strike and abs(price - current_strike) >= 50:
+                        S["_atm_resolving"] = True
                         _snap_price2 = price
                         def _do_roll(p=_snap_price2):
-                            atm = _resolve_nifty_atm(p)
-                            if atm:
-                                _apply_nifty_atm(atm)
-                        S["atm_pending"] = True   # block re-trigger during roll
+                            try:
+                                atm = _resolve_nifty_atm(p)
+                                if atm:
+                                    _apply_nifty_atm(atm)
+                            finally:
+                                with _state_lock:
+                                    S["_atm_resolving"] = False
                         threading.Thread(target=_do_roll, daemon=True).start()
 
                 # ── Auto daily reset ──────────────────────────────────────
-                today = datetime.now().date()
+                today = _cnow().date()
                 if today != S["trading_date"]:
                     S["trading_date"]     = today
                     S["day_start_capital"] = S["capital"]  # snapshot for 2.5% target
@@ -1004,11 +1164,12 @@ def process_ticks(ticks):
                 # ── Periodic position sync (real mode, every 30s) ────────
                 if (S["trading_mode"] == "real"
                         and S["running"]
+                        and not S.get("_replay")
                         and _time.time() - S.get("_pos_sync_ts", 0) > 30):
                     S["_pos_sync_ts"] = _time.time()
                     threading.Thread(target=_sync_zerodha_positions, daemon=True).start()
 
-                if S["running"] and not S["trade_open"]:
+                if S["running"] and not S["trade_open"] and S["scalp_mode"] != "manual":
                     result = _check_spike(price)
                     if result:
                         trade_opened_payload = result.get("trade_opened_payload")
@@ -1093,14 +1254,15 @@ def process_ticks(ticks):
     # ── All I/O after lock is fully released ──────────────────────────────────
 
     if daily_reset_fired:
-        today_str = datetime.now().strftime("%d %b %Y")
-        socketio.emit("daily_reset", {"date": today_str}, namespace="/")
+        today_str = _cnow().strftime("%d %b %Y")
+        _emitter.emit("daily_reset", {"date": today_str})
         log(f"📅 New trading day {today_str} — session and logs cleared", "info")
 
     # ── Execute partial order if queued (outside lock) ───────────────────────
     partial_order = None
     with _state_lock:
         partial_order = S.pop("_partial_order", None)
+        log_entries = S.pop("_deferred_logs", []) + log_entries
     if partial_order and S.get("trading_mode") == "real":
         try:
             place_sell(partial_order["symbol"], partial_order["qty"])
@@ -1112,19 +1274,21 @@ def process_ticks(ticks):
         log(msg, level)
 
     if trade_opened_payload:
-        socketio.emit("trade_opened", trade_opened_payload, namespace="/")
+        _emitter.emit("trade_opened", trade_opened_payload)
 
     _run_order_intent(order_intent, trade_opened_payload, trade_closed_payload)
 
     if trade_closed_payload:
-        socketio.emit("trade_closed", trade_closed_payload, namespace="/")
+        _emitter.emit("trade_closed", trade_closed_payload)
 
-    broadcast()
+    # Trade lifecycle events broadcast immediately; plain price ticks are
+    # rate-limited (the 1 s periodic broadcaster is the freshness floor).
+    broadcast(throttle=not (trade_opened_payload or trade_closed_payload))
 
 
 # ── Filters ───────────────────────────────────────────────────────────────────
 def _is_valid_time():
-    now   = datetime.now().time()
+    now   = _cnow().time()
     start = dtime(RC["trade_start_h"], RC["trade_start_m"])
     end   = dtime(RC["trade_end_h"],   RC["trade_end_m"])
     return start <= now <= end
@@ -1133,8 +1297,8 @@ def _is_valid_time():
 def _is_in_cooldown():
     if not S["cooldown_until"]:
         return False
-    if datetime.now() < S["cooldown_until"]:
-        remaining = int((S["cooldown_until"] - datetime.now()).total_seconds())
+    if _cnow() < S["cooldown_until"]:
+        remaining = int((S["cooldown_until"] - _cnow()).total_seconds())
         S["last_skip_reason"] = f"Cooldown — {remaining}s remaining"
         return True
     S["cooldown_until"] = None
@@ -1159,37 +1323,43 @@ def _option_volume_confirms(side):
     return cur_vol >= avg * RC["option_vol_factor"]
 
 
-def _check_daily_limits():
-    """Must be called under _state_lock. Returns False and mutates S if limit hit."""
+def _daily_limit_breached() -> str | None:
+    """PURE predicate — must be called under _state_lock, mutates nothing.
+    Returns the breach reason or None."""
     if S["session_pnl"] <= -RC["max_daily_loss"]:
-        S["last_skip_reason"] = f"Daily loss limit ₹{RC['max_daily_loss']} hit"
-        S["running"] = False
-        _write_daily_summary_async("Loss limit hit")
-        return False
-    # Max drawdown protection
+        return f"Daily loss limit ₹{RC['max_daily_loss']} hit"
     if MAX_DRAWDOWN_PCT > 0:
         drawdown_limit = S["day_start_capital"] * MAX_DRAWDOWN_PCT / 100
         if S["session_pnl"] <= -drawdown_limit:
-            S["last_skip_reason"] = f"Max drawdown {MAX_DRAWDOWN_PCT}% hit — ₹{S['session_pnl']:+.2f}"
-            S["running"] = False
-            _write_daily_summary_async("Max drawdown hit")
-            return False
-    # Daily profit target (0 = disabled — no limit)
+            return f"Max drawdown {MAX_DRAWDOWN_PCT}% hit — ₹{S['session_pnl']:+.2f}"
     if DAILY_PROFIT_PCT > 0:
         day_target = round(S["day_start_capital"] * DAILY_PROFIT_PCT, 2)
         if S["session_pnl"] >= day_target:
-            S["last_skip_reason"] = (
+            return (
                 f"Daily target hit: ₹{S['session_pnl']:+.2f} "
                 f"(target={DAILY_PROFIT_PCT*100}% of ₹{S['day_start_capital']:,.0f} = ₹{day_target:.0f})"
             )
-            S["running"] = False
-            _write_daily_summary_async("Target achieved")
-            return False
-    return True
+    return None
+
+
+def _check_daily_limits():
+    """Must be called under _state_lock. Checks limits and — unlike the pure
+    predicate — STOPS the robot when one is breached. Returns True if trading
+    may continue."""
+    reason = _daily_limit_breached()
+    if reason is None:
+        return True
+    S["last_skip_reason"] = reason
+    if S["running"]:
+        S["running"] = False
+        _write_daily_summary_async(reason)
+    return False
 
 
 def _write_daily_summary_async(reason: str):
     """Fire-and-forget: write daily summary to Excel outside the lock."""
+    if S.get("_replay"):
+        return
     snap_pnl     = S["session_pnl"]
     snap_capital = S["day_start_capital"]
     snap_trades  = S["trades_today"]
@@ -1214,7 +1384,7 @@ def _check_force_exit_state():
     """
     if not S["trade_open"]:
         return None
-    now        = datetime.now().time()
+    now        = _cnow().time()
     force_exit_t = dtime(RC["force_exit_h"], RC["force_exit_m"])
     if now >= force_exit_t:
         aslot = _active_slot()
@@ -1223,6 +1393,149 @@ def _check_force_exit_state():
         if result:
             return _on_trade_closed_state(result)
     return None
+
+
+# ── Scalp micro-move detector (AI-based) ─────────────────────────────────────
+def _check_scalp_micro(current):
+    """
+    Called under _state_lock when scalp_mode is True.
+    Uses AI signals (momentum, RSI, velocity, trend) to detect small
+    directional moves worth scalping — enters without requiring a full spike.
+    Returns a side ("CE"/"PE") or None.
+    """
+    ticks = list(S["nifty_ticks"])
+    if len(ticks) < SCALP_MICRO_WINDOW + 5:
+        return None
+
+    # 1. Short-window momentum (last N ticks)
+    window = ticks[-SCALP_MICRO_WINDOW:]
+    changes = [window[i] - window[i - 1] for i in range(1, len(window))]
+    up_ct   = sum(1 for c in changes if c > 0)
+    dn_ct   = sum(1 for c in changes if c < 0)
+    cum_move = window[-1] - window[0]
+    move_pct = abs(cum_move) / current * 100 if current else 0
+
+    # Need minimum move with directional consistency
+    if move_pct < SCALP_MICRO_MOVE_PCT:
+        return None
+    total = len(changes)
+    if total == 0:
+        return None
+
+    # 2. Velocity check — must be moving, not stagnant
+    velocity = sum(abs(c) for c in changes) / total
+    if velocity < 0.3:
+        return None
+
+    # 3. RSI confirmation — avoid overbought/oversold extremes
+    rsi = _compute_rsi(ticks)
+
+    # 4. Determine side from micro-momentum
+    if up_ct / total >= SCALP_MICRO_CONSISTENCY and cum_move > 0:
+        side = "CE"
+        if rsi > 80:
+            return None  # overbought — skip CE scalp
+    elif dn_ct / total >= SCALP_MICRO_CONSISTENCY and cum_move < 0:
+        side = "PE"
+        if rsi < 20:
+            return None  # oversold — skip PE scalp
+    else:
+        return None
+
+    # 5. Regime check — don't scalp against strong trend
+    regime = _market_brain.get_regime(ticks)
+    if regime == "trending_down" and side == "CE":
+        return None
+    if regime == "trending_up" and side == "PE":
+        return None
+    if regime == "choppy":
+        # In choppy — require stronger micro-move
+        if move_pct < SCALP_MICRO_MOVE_PCT * 1.6:
+            return None
+
+    # 6. Slope must at least be flat-to-favourable (relaxed vs normal)
+    slope = S["regression_slope"]
+    if slope is not None:
+        if side == "CE" and slope < -0.3:
+            return None
+        if side == "PE" and slope > 0.3:
+            return None
+
+    return side
+
+
+def _resize_tick_deques():
+    """Rebuild the tick deques with maxlen derived from current RC values,
+    preserving contents. Must be called under _state_lock."""
+    buf = max(RC["regression_window"], RC["momentum_window"] + 2,
+              OPTION_ATR_PERIOD + 2, RC["confirm_ticks_slow"] + 5,
+              RC["jump_atr_window"] + 2)
+    for key, maxlen in (("nifty_ticks", buf),
+                        ("nifty_tick_times", buf),
+                        ("nifty_atr_ticks", RC["jump_atr_window"] + 2)):
+        old = S.get(key)
+        if old is not None and getattr(old, "maxlen", None) != maxlen:
+            S[key] = deque(old, maxlen=maxlen)
+
+    # Rebuild incremental indicators with the new windows, replaying the
+    # retained tick history so slope/ATR stay continuous.
+    slope_ind = RollingSlope(buf)
+    for p in S["nifty_ticks"]:
+        slope_ind.push(p)
+    atr_ind = RollingATR(RC["jump_atr_window"] + 1)
+    for p in S["nifty_atr_ticks"]:
+        atr_ind.push(p)
+    S["_slope_ind"] = slope_ind
+    S["_atr_ind"]   = atr_ind
+
+
+def _target_pct() -> float:
+    """Standing limit-sell target %. Scalp mode uses the scalp target so the
+    dashboard display and the actually-placed order never diverge."""
+    return SCALP_TARGET_PCT if S["scalp_mode"] != "off" else TARGET_LIMIT_PCT
+
+
+def _session_stats() -> dict:
+    """Session stats snapshot for the intelligent trade budget.
+    Must be called under _state_lock."""
+    return {
+        "trades_today":      S["trades_today"],
+        "wins":              S["wins"],
+        "losses":            S["losses"],
+        "session_pnl":       S["session_pnl"],
+        "loss_streak":       S.get("loss_streak", 0),
+        "capital":           S["capital"],
+        "day_start_capital": S["day_start_capital"],
+        # Hard operator cap — the adaptive budget may only shrink below it
+        "max_trades_cap":    RC.get("max_trades_day", 0),
+    }
+
+
+def _entry_gates_ok() -> tuple[bool, str]:
+    """
+    HARD risk gates every entry path must pass — including manual scalp buys
+    (which previously bypassed all of them). Must be called under _state_lock.
+
+    Gates: daily loss / drawdown / profit target, MAX_TRADES_DAY hard cap,
+    adaptive trade budget. Returns (ok, reason).
+    """
+    breach = _daily_limit_breached()
+    if breach:
+        return False, breach
+
+    # Hard operator cap — previously displayed/settable but never enforced
+    cap = RC.get("max_trades_day", 0)
+    if cap and S["trades_today"] >= cap:
+        return False, f"Max trades/day hit ({S['trades_today']}/{cap})"
+
+    _budget = _intel_context(_session_stats()).get("trade_budget", {})
+    if _budget.get("remaining", 1) <= 0:
+        return False, (
+            f"Trade budget exhausted: {_budget.get('max_trades',0)} trades  "
+            f"[{_budget.get('confidence','?')}]  "
+            f"{' | '.join(_budget.get('reasons', [])[-2:])}"
+        )
+    return True, ""
 
 
 # ── Spike detector ────────────────────────────────────────────────────────────
@@ -1236,23 +1549,10 @@ def _check_spike(current):
     S["nifty_prev_tick"] = current
     if prev is None:
         return None
-    # ── Intelligent trade budget (replaces hard max_trades_day) ─────
-    _session_stats = {
-        "trades_today":      S["trades_today"],
-        "wins":              S["wins"],
-        "losses":            S["losses"],
-        "session_pnl":       S["session_pnl"],
-        "loss_streak":       S.get("loss_streak", 0),
-        "capital":           S["capital"],
-        "day_start_capital": S["day_start_capital"],
-    }
-    _budget = _market_intel.get_context(_session_stats).get("trade_budget", {})
-    if _budget.get("remaining", 1) <= 0:
-        S["last_skip_reason"] = (
-            f"Trade budget exhausted: {_budget.get('max_trades',0)} trades  "
-            f"[{_budget.get('confidence','?')}]  "
-            f"{' | '.join(_budget.get('reasons', [])[-2:])}"
-        )
+    # ── Hard risk gates (shared with manual entries) ─────────────────
+    ok, gate_reason = _entry_gates_ok()
+    if not ok:
+        S["last_skip_reason"] = gate_reason
         return None
     if not _check_daily_limits():
         return None
@@ -1265,21 +1565,37 @@ def _check_spike(current):
         return _continue_confirmation(current)
 
     jump_pts = S["jump_threshold"]
-    _is_trend_entry = False
+    _scalp_active = S["scalp_mode"] != "off"
+    if _scalp_active:
+        jump_pts = round(jump_pts * SCALP_JUMP_MULTIPLIER, 2)
     if abs(move) < jump_pts:
-        # No spike — check for slow trend instead
-        trend_side = _check_trend(current)
-        if trend_side is None:
-            return None
-        side = trend_side
-        _is_trend_entry = True
-        S["fast_entry"] = True   # trend IS the confirmation — enter now
+        # No spike — in scalp mode, try AI micro-move detection first
+        if S["scalp_mode"] == "auto":
+            scalp_side = _check_scalp_micro(current)
+            if scalp_side:
+                side = scalp_side
+                S["fast_entry"] = True   # scalp = immediate entry
+            else:
+                # Fall through to trend detection
+                trend_side = _check_trend(current)
+                if trend_side is None:
+                    return None
+                side = trend_side
+                S["fast_entry"] = True
+        else:
+            # Normal mode — check for slow trend
+            trend_side = _check_trend(current)
+            if trend_side is None:
+                return None
+            side = trend_side
+            S["fast_entry"] = True   # trend IS the confirmation — enter now
     else:
-        # Spike speed validation
-        speed_ok, speed_reason = _check_spike_speed(current)
-        if not speed_ok:
-            S["last_skip_reason"] = speed_reason
-            return None
+        # Spike speed validation (skip in scalp mode — micro-moves are slower)
+        if not _scalp_active:
+            speed_ok, speed_reason = _check_spike_speed(current)
+            if not speed_ok:
+                S["last_skip_reason"] = speed_reason
+                return None
         side = "CE" if move > 0 else "PE"
 
     if side not in S["active_sides"]:
@@ -1305,7 +1621,8 @@ def _check_spike(current):
         S["last_skip_reason"] = f"{side} option volume too low"
         return None
 
-    if not _regression_confirms(side):
+    # Scalp mode: skip regression filter (micro-move already validated by AI)
+    if not _scalp_active and not _regression_confirms(side):
         slope = S["regression_slope"]
         S["last_skip_reason"] = f"Slope {slope:+.3f} — against trend"
         return None
@@ -1316,16 +1633,19 @@ def _check_spike(current):
         S["last_skip_reason"] = opt_reason
         return None
 
-    # Breakout filter
-    brk_ok, brk_reason = _breakout_filter_ok(current)
-    if not brk_ok:
-        S["last_skip_reason"] = brk_reason
-        return None
+    # Breakout filter (skip in scalp mode — capturing micro-moves, not breakouts)
+    if not _scalp_active:
+        brk_ok, brk_reason = _breakout_filter_ok(current)
+        if not brk_ok:
+            S["last_skip_reason"] = brk_reason
+            return None
 
     S["last_skip_reason"] = None
 
-    adaptive_ticks      = _adaptive_confirm_ticks(side)
+    adaptive_ticks, confirm_label = _adaptive_confirm_ticks(side)
     S["confirm_needed"] = adaptive_ticks
+    # Deferred — emitted by process_ticks after the lock is released
+    S.setdefault("_deferred_logs", []).append((confirm_label, "info"))
 
     prices  = list(S["nifty_ticks"])
     m_score = _momentum_score(prices, side)
@@ -1340,6 +1660,31 @@ def _check_spike(current):
         S["nifty_ref"]       = prev
         S["fast_entry"]      = False
 
+    # ── AI Entry Scoring + Intelligence + Analyzer (shared gate block) ──
+    allow, override, log_entries_ai = _score_and_build_override(side, current)
+    if not allow:
+        return None
+
+    if S["fast_entry"]:
+        result = _enter_trade_state(side, current, override_params=override)
+        if result:
+            result["logs"] = log_entries_ai + result.get("logs", [])
+        return result
+
+    return None
+
+
+def _score_and_build_override(side, current):
+    """
+    Called under _state_lock. Runs the full AI gate chain — MarketBrain,
+    Market Intelligence, Entry Analyzer — and builds the entry param override.
+
+    Shared by the fast-entry path AND the slow-confirmation path so confirmed
+    entries get a FRESH verdict (previously they entered with override=None,
+    bypassing every AI gate and using raw config SL/trail).
+
+    Returns (allow: bool, override: dict | None, logs: list).
+    """
     # ── AI Entry Scoring (MarketBrain) ──────────────────────────────────
     nifty_list = list(S["nifty_ticks"])
     ai_state = {
@@ -1361,7 +1706,7 @@ def _check_spike(current):
     if not ai_allow:
         S["last_skip_reason"] = ai_reason
         _reset_pending()
-        return None
+        return False, None, []
 
     # ── Market Intelligence Gate ────────────────────────────────────
     intel_ctx = _market_intel.get_context()
@@ -1371,7 +1716,7 @@ def _check_spike(current):
     if intel_rec.get("avoid_entry"):
         S["last_skip_reason"] = f"INTEL: {' | '.join(intel_rec.get('reasons', ['avoid']))}"
         _reset_pending()
-        return None
+        return False, None, []
 
     # Entry bias: if intelligence has a direction preference, enforce it
     entry_bias = intel_rec.get("entry_bias", "neutral")
@@ -1381,7 +1726,7 @@ def _check_spike(current):
             f"({intel_rec.get('day_type','?')} DTE={intel_ctx.get('day_info',{}).get('dte','?')})"
         )
         _reset_pending()
-        return None
+        return False, None, []
 
     # ── 8-Dimension Entry Analysis ───────────────────────────────────
     opt_slot = _slot(side)
@@ -1428,7 +1773,7 @@ def _check_spike(current):
     if not verdict.allow:
         S["last_skip_reason"] = verdict.reason
         _reset_pending()
-        return None
+        return False, None, []
 
     day_info = intel_ctx.get("day_info", {})
     log_entries_ai = [
@@ -1462,13 +1807,15 @@ def _check_spike(current):
         "timeout_secs":  verdict.recommended_timeout,
     }
 
-    if S["fast_entry"]:
-        result = _enter_trade_state(side, current, override_params=override)
-        if result:
-            result["logs"] = log_entries_ai + result.get("logs", [])
-        return result
+    # Scalp mode: override with tight scalping parameters
+    if S["scalp_mode"] != "off":
+        override["sl_pct_p1"]     = SCALP_SL_PHASE1_PCT
+        override["sl_pct_p2"]     = SCALP_SL_PHASE2_PCT
+        override["sl_phase1_secs"] = SCALP_SL_PHASE1_SECS
+        override["trail_pct"]     = SCALP_TRAIL_PCT
+        override["timeout_secs"]  = SCALP_TIMEOUT_SECS
 
-    return None
+    return True, override, log_entries_ai
 
 
 def _continue_confirmation(current):
@@ -1488,8 +1835,17 @@ def _continue_confirmation(current):
         return None
 
     if count >= needed:
-        result = _enter_trade_state(side, current)
+        # Re-run the full AI gate chain at confirmation completion — the
+        # verdict from the spike tick is stale by now, and entering with no
+        # override previously bypassed every AI gate and used raw config
+        # SL/trail instead of intel-recommended params.
+        allow, override, ai_logs = _score_and_build_override(side, current)
         _reset_pending()
+        if not allow:
+            return None
+        result = _enter_trade_state(side, current, override_params=override)
+        if result:
+            result["logs"] = ai_logs + result.get("logs", [])
         return result
 
     return None
@@ -1500,8 +1856,6 @@ def _reset_pending():
     S["confirm_count"]   = 0
     S["spike_ref_price"] = None
 
-
-# ── Tiered SL ─────────────────────────────────────────────────────────────────
 
 # ── Enter trade (state mutation only) ────────────────────────────────────────
 def _enter_trade_state(side, nifty_price, override_params: dict | None = None):
@@ -1547,6 +1901,19 @@ def _enter_trade_state(side, nifty_price, override_params: dict | None = None):
     cap_limit  = RC.get("max_lots_per_trade", 0)
     qty_lots   = min(auto_lots, cap_limit) if cap_limit > 0 else auto_lots
 
+    # ML-joinable metadata — lands in the trade CSV at close (v2 columns)
+    verdict_snap = S.get("entry_verdict") or {}
+    entry_meta = {
+        "mode":                 S["trading_mode"],
+        "scalp_mode":           S["scalp_mode"],
+        "nifty_entry":          nifty_price,
+        "ai_entry_score":       S.get("ai_entry_score", ""),
+        "regime":               S.get("ai_regime", ""),
+        "entry_analyzer_score": verdict_snap.get("score", ""),
+        "entry_grade":          verdict_snap.get("grade", ""),
+        "entry_verdict_json":   _json_mod.dumps(verdict_snap, default=str)[:1500] if verdict_snap else "",
+    }
+
     info = S["exit_engine"].open_leg(
         side, opt_price,
         sl_pct_override         = sl_pct_for_mm,
@@ -1558,6 +1925,8 @@ def _enter_trade_state(side, nifty_price, override_params: dict | None = None):
         symbol=S.get("index_name", ""),
         option_symbol=sl.get("symbol", ""),
         qty_override=qty_lots,
+        lot_size=mm_lot_size,
+        meta=entry_meta,
     )
 
     S["trade_open"]         = True
@@ -1565,13 +1934,13 @@ def _enter_trade_state(side, nifty_price, override_params: dict | None = None):
     S["active_side"]        = side
     S["active_status"]      = "open"
     S["trades_today"]      += 1
-    S["trade_open_time"]    = datetime.now()
+    S["trade_open_time"]    = _cnow()
     S["nifty_entry_price"]  = nifty_price   # record NIFTY level at entry
     S["option_atr"]         = _compute_option_atr(seed)
     S["last_order_id"]      = None
     S["mm_lot_size"]        = mm_lot_size   # stored for partial exit handler
 
-    mode_label = "FAST" if S["fast_entry"] else f"CONFIRMED({S['confirm_needed']}t)"
+    mode_label = f"SCALP-{S['scalp_mode'].upper()}" if S["scalp_mode"] != "off" else ("FAST" if S["fast_entry"] else f"CONFIRMED({S['confirm_needed']}t)")
     jmp_label  = (f"ATR-auto={S['jump_threshold']:.2f}pts" if RC["auto_jump"]
                   else f"fixed={S['jump_threshold']:.2f}pts")
 
@@ -1636,7 +2005,9 @@ def _on_trade_closed_state(result):
     Returns {trade_closed_payload, order_intent, logs} — no I/O performed here.
     """
     side            = result["side"]
-    pnl             = result["pnl"]
+    pnl             = result["pnl"]                       # remaining-qty P&L only
+    partial_pnl     = result.get("partial_realized_pnl", 0.0) or 0.0
+    pnl_total       = result.get("pnl_total", pnl)        # incl. partial bookings
     reason          = result["reason"]
     sl_pct_used     = result.get("sl_pct",        RC["sl_phase1_pct"])
     trail_pct_used  = result.get("trail_pct",      BUY_TRAIL_PCT)
@@ -1656,27 +2027,28 @@ def _on_trade_closed_state(result):
         "timeout":    f"Timeout (>{RC['trade_timeout_secs']}s)",
         "manual":     "Manual exit (button)",
         "force_exit": "Force-exit (market close)",
-        "momentum_stall": "Momentum stalled (no new high)",
-        "volume_dryup":   "Volume dried up (activity collapsed)",
         "ai_analyzer":    "AI Analyzer exit (multi-signal)",
     }.get(reason, reason)
 
-    color = "success" if pnl >= 0 else "error"
+    color = "success" if pnl_total >= 0 else "error"
 
+    partial_label = f"  (incl. partials ₹{partial_pnl:+.2f})" if partial_pnl else ""
     logs = [
         (
-            f"{'▲' if pnl >= 0 else '▼'} EXIT {side}  "
+            f"{'▲' if pnl_total >= 0 else '▼'} EXIT {side}  "
             f"₹{result['entry']:.2f}→₹{result['exit_price']:.2f}  "
-            f"P&L=₹{pnl:+.2f} ({result.get('pnl_pct', 0):+.1f}%)  "
+            f"P&L=₹{pnl_total:+.2f}{partial_label} ({result.get('pnl_pct', 0):+.1f}%)  "
             f"peak={peak_pct:+.1f}%  held={result.get('held_secs', 0)}s  [{reason_label}]",
             color,
         ),
     ]
 
     sl_sym   = _slot(side)["symbol"]
-    real_qty = (result.get("qty") or BUY_QTY) * LOT_SIZE
+    real_qty = (result.get("qty") or BUY_QTY) * (result.get("lot_size") or LOT_SIZE)
 
-    S["trade_pnl"]          = pnl
+    S["trade_pnl"]          = pnl_total
+    # Partial P&L was already added to session_pnl at booking time —
+    # only the remaining-qty P&L is added here (no double count).
     S["session_pnl"]        = round(S["session_pnl"] + pnl, 2)
     S["active_status"]      = f"closed_{reason}"
     S["capital"]            = result["equity_after"]
@@ -1700,7 +2072,7 @@ def _on_trade_closed_state(result):
         "info",
     ))
 
-    if pnl >= 0:
+    if pnl_total >= 0:
         S["wins"] += 1
         S["loss_streak"] = 0  # reset streak on win
     else:
@@ -1711,12 +2083,10 @@ def _on_trade_closed_state(result):
     if SMART_COOLDOWN_ENABLED:
         _cd = {
             "sl":              COOLDOWN_AFTER_SL,
-            "trail":           COOLDOWN_AFTER_TRAIL_WIN  if pnl >= 0 else COOLDOWN_AFTER_TRAIL_LOSS,
-            "timeout":         COOLDOWN_AFTER_TIMEOUT_WIN if pnl >= 0 else COOLDOWN_AFTER_TIMEOUT_LOSS,
+            "trail":           COOLDOWN_AFTER_TRAIL_WIN  if pnl_total >= 0 else COOLDOWN_AFTER_TRAIL_LOSS,
+            "timeout":         COOLDOWN_AFTER_TIMEOUT_WIN if pnl_total >= 0 else COOLDOWN_AFTER_TIMEOUT_LOSS,
             "ai_exit":         COOLDOWN_AFTER_AI_EXIT,
             "nifty_reversal":  COOLDOWN_AFTER_REVERSAL,
-            "momentum_stall":  COOLDOWN_AFTER_TRAIL_WIN,   # quick re-entry
-            "volume_dryup":    COOLDOWN_AFTER_TRAIL_WIN,   # quick re-entry
             "ai_analyzer":     COOLDOWN_AFTER_AI_EXIT,     # AI-driven exit
             "manual":          0,
             "force_exit":      0,
@@ -1725,8 +2095,12 @@ def _on_trade_closed_state(result):
         # Legacy flat cooldown on SL only
         _cd = RC["sl_cooldown_secs"] if reason == "sl" else 0
 
+    # Scalp mode: use minimal cooldown for quick re-entry
+    if S["scalp_mode"] != "off":
+        _cd = min(_cd, SCALP_COOLDOWN_SECS)
+
     if _cd > 0:
-        S["cooldown_until"] = datetime.now() + timedelta(seconds=_cd)
+        S["cooldown_until"] = _cnow() + timedelta(seconds=_cd)
         logs.append((f"⏳ Cooldown {_cd}s [{reason}]", "warning"))
 
     logs.append((
@@ -1782,10 +2156,15 @@ def _on_partial_exit(partial_result: dict) -> dict:
     peak_pct    = partial_result["peak_profit_pct"]
     reason_lbl  = partial_result["reason"].replace("_", " ").upper()
     sl_sym      = _active_slot()["symbol"] if _active_slot() else ""
-    lot_sz      = _active_slot().get("lot_size") or S.get("mm_lot_size") or LOT_SIZE
+    lot_sz      = partial_result.get("lot_size") or S.get("mm_lot_size") or LOT_SIZE
 
-    pnl_per_lot  = round((price - S["exit_engine"]._leg["entry"]) * lot_sz, 2)
-    partial_pnl  = round(pnl_per_lot * partial_qty, 2)
+    # Realized P&L computed by the engine (already credited to its capital).
+    partial_pnl = partial_result.get("partial_pnl", 0.0)
+
+    # Book it into the session immediately — previously partial profit was
+    # displayed but never counted in session_pnl / capital.
+    S["session_pnl"] = round(S["session_pnl"] + partial_pnl, 2)
+    S["capital"]     = S["exit_engine"].capital
 
     logs = [
         (
@@ -1815,6 +2194,7 @@ def _close_active_trade(reason="manual"):
     """
     trade_closed_payload = None
     order_intent         = None
+    deferred_logs        = []
 
     with _state_lock:
         if S["active_status"] != "open":
@@ -1826,13 +2206,16 @@ def _close_active_trade(reason="manual"):
             closed = _on_trade_closed_state(result)
             trade_closed_payload = closed.get("trade_closed_payload")
             order_intent         = closed.get("order_intent")
-            for msg, level in closed.get("logs", []):
-                log(msg, level)
+            deferred_logs        = closed.get("logs", [])
+
+    # I/O strictly after the lock — log() emits via SocketIO
+    for msg, level in deferred_logs:
+        log(msg, level)
 
     _run_order_intent(order_intent, closed_payload=trade_closed_payload)
 
     if trade_closed_payload:
-        socketio.emit("trade_closed", trade_closed_payload, namespace="/")
+        _emitter.emit("trade_closed", trade_closed_payload)
 
     return trade_closed_payload, order_intent
 
@@ -1854,7 +2237,7 @@ def _ws_thread():
                 connected = (ev == "connected")
                 with _state_lock:
                     S["ws_connected"] = connected
-                socketio.emit("ws_status", {"connected": connected}, namespace="/")
+                _emitter.emit("ws_status", {"connected": connected})
                 log(f"WebSocket {'connected ✔' if connected else 'disconnected ✖'}",
                     "success" if connected else "error")
                 if connected and S["subscribed_tokens"]:
@@ -2097,10 +2480,17 @@ def on_update_config(data):
                 else:
                     live_updated.append(k)
 
+    # Window-size params: actually resize the live deques (previously the RC
+    # value updated but the deques kept their old maxlen until a restart,
+    # silently making values above the old size inert).
+    if restarted:
+        with _state_lock:
+            _resize_tick_deques()
+
     if live_updated:
         log(f"⚙ Live config updated: {', '.join(live_updated)}", "success")
     if restarted:
-        log(f"⚙ Restart-needed params saved: {', '.join(restarted)}", "warning")
+        log(f"⚙ Window params applied live (deques resized): {', '.join(restarted)}", "success")
 
     emit("config_saved", {
         "live_updated":   live_updated,
@@ -2119,12 +2509,33 @@ def on_start(data):
     idx_token      = BANKNIFTY_TOKEN if idx_sel == "BANKNIFTY" else NIFTY_TOKEN
     idx_name       = "BANKNIFTY" if idx_sel == "BANKNIFTY" else "NIFTY"
 
-    buf = max(REGRESSION_WINDOW, MOMENTUM_WINDOW + 2, OPTION_ATR_PERIOD + 2,
-              CONFIRM_TICKS_SLOW + 5, RC["jump_atr_window"] + 2)
-
     with _state_lock:
-        S["slots"] = {"CE": _make_opt_slot(), "PE": _make_opt_slot()}
-        S.update({
+        _reset_session_state(idx_token, idx_name)
+        mode_str = "🔴 REAL TRADING" if S["trading_mode"] == "real" else "🔵 DEMO (paper)"
+        jmp_str  = (f"AUTO ATR×{RC['jump_atr_multiplier']} [{RC['jump_min_pts']}–{RC['jump_max_pts']}pts]"
+                    if RC["auto_jump"] else f"FIXED {RC['jump_pct']}% Nifty")
+
+    _subscribe([idx_token, VIX_TOKEN])
+    _vol_detector.reset()
+    _vix_tracker.reset()
+    _mtf_analyzer.reset()
+
+    _recorder.record_meta("session_start", {
+        "index": idx_name, "mode": S["trading_mode"],
+        "rc": {k: v for k, v in RC.items()},
+    })
+
+    _finish_on_start(mode_str, jmp_str, idx_token, idx_name)
+
+
+def _reset_session_state(idx_token, idx_name):
+    """Fresh session state — shared by on_start (live) and the replay
+    harness. Must be called under _state_lock."""
+    buf = max(RC["regression_window"], RC["momentum_window"] + 2,
+              OPTION_ATR_PERIOD + 2, RC["confirm_ticks_slow"] + 5,
+              RC["jump_atr_window"] + 2)
+    S["slots"] = {"CE": _make_opt_slot(), "PE": _make_opt_slot()}
+    S.update({
             "running":            True,
             "trade_open":         False,
             "active_sides":       {"CE", "PE"},
@@ -2171,16 +2582,18 @@ def on_start(data):
             "index_token":        idx_token,
             "index_name":         idx_name,
             "atm_pending":        False,  # startup thread resolves immediately
-        })
-        mode_str = "🔴 REAL TRADING" if S["trading_mode"] == "real" else "🔵 DEMO (paper)"
-        jmp_str  = (f"AUTO ATR×{RC['jump_atr_multiplier']} [{RC['jump_min_pts']}–{RC['jump_max_pts']}pts]"
-                    if RC["auto_jump"] else f"FIXED {RC['jump_pct']}% Nifty")
+            "_atm_resolving":     False,
+            "last_ws_tick_ts":    0,
+            "scalp_mode":         "off",  # never inherit a stale scalp mode
+            "_slope_ind":         RollingSlope(buf),
+            "_atr_ind":           RollingATR(RC["jump_atr_window"] + 1),
+    })
 
-    _subscribe([idx_token, VIX_TOKEN])
-    _vol_detector.reset()
-    _vix_tracker.reset()
-    _mtf_analyzer.reset()
 
+def _finish_on_start(mode_str, jmp_str, idx_token, idx_name):
+    """on_start tail: logging + capital/ATM/pos-sync startup threads.
+    Split from the handler so replay (which must not spawn REST threads)
+    can reuse _reset_session_state alone."""
     log(f"Buy Robot v8.2 started — {mode_str}", "success")
     log(f"  Spike threshold: {jmp_str}  |  index ref={idx_name}", "info")
     if S["trading_mode"] == "real":
@@ -2345,6 +2758,13 @@ def _adopt_external_position(position: dict):
             symbol=S.get("index_name", ""),
             option_symbol=symbol,
             qty_override=params["qty_lots"],
+            lot_size=params.get("lot_size"),
+            meta={
+                "mode":        S["trading_mode"],
+                "scalp_mode":  S["scalp_mode"],
+                "nifty_entry": S.get("nifty_price") or "",
+                "regime":      "adopted",
+            },
         )
 
         S["trade_open"]         = True
@@ -2374,7 +2794,7 @@ def _adopt_external_position(position: dict):
         "success",
     )
 
-    socketio.emit("trade_opened", {
+    _emitter.emit("trade_opened", {
         "side":         side,
         "entry":        entry_price,
         "sl":           info["sl"],
@@ -2382,7 +2802,7 @@ def _adopt_external_position(position: dict):
         "trading_mode": "real",
         "adopted":      True,
         "symbol":       symbol,
-    }, namespace="/")
+    })
     broadcast()
 
 
@@ -2424,10 +2844,11 @@ def on_refresh_atm():
     """Force re-resolve NIFTY ATM options."""
     with _state_lock:
         price = S.get("nifty_price")
-        if not price:
-            emit("error", {"msg": "No NIFTY price yet — wait for ticks"})
-            return
-        S["atm_pending"] = False   # will be set by _do_resolve
+        if price:
+            S["atm_pending"] = False   # will be set by _do_resolve
+    if not price:
+        emit("error", {"msg": "No NIFTY price yet — wait for ticks"})
+        return
     def _do():
         atm = _resolve_nifty_atm(price)
         if atm:
@@ -2455,7 +2876,7 @@ def on_adopt_positions(data):
         try:
             positions_data = fetch_positions()
             if not positions_data:
-                socketio.emit("adopt_status", {"adopted": False, "positions": 0}, namespace="/")
+                _emitter.emit("adopt_status", {"adopted": False, "positions": 0})
                 return
 
             known_sym = ""
@@ -2469,13 +2890,13 @@ def on_adopt_positions(data):
             if S.get("trade_open") and S.get("adopted_position"):
                 # Already managing an adopted position
                 ap = S["adopted_position"]
-                socketio.emit("adopt_status", {
+                _emitter.emit("adopt_status", {
                     "adopted": True,
                     "symbol": ap.get("symbol", ""),
                     "side": ap.get("side", ""),
                     "pnl_pct": ap.get("pnl_pct", 0),
                     "positions": len(open_pos),
-                }, namespace="/")
+                })
                 return
 
             if not S.get("trade_open") and open_pos:
@@ -2494,22 +2915,22 @@ def on_adopt_positions(data):
 
                 if best:
                     _adopt_external_position(best)
-                    socketio.emit("adopt_status", {
+                    _emitter.emit("adopt_status", {
                         "adopted": True,
                         "symbol": best["symbol"],
                         "side": best["side"],
                         "pnl_pct": round((best["last_price"] - best["avg_price"]) / best["avg_price"] * 100, 1) if best["avg_price"] else 0,
                         "positions": len(open_pos),
-                    }, namespace="/")
+                    })
                     return
 
-            socketio.emit("adopt_status", {
+            _emitter.emit("adopt_status", {
                 "adopted": False,
                 "positions": len(open_pos),
-            }, namespace="/")
+            })
 
         except Exception as exc:
-            socketio.emit("adopt_status", {"adopted": False, "positions": 0, "error": str(exc)}, namespace="/")
+            _emitter.emit("adopt_status", {"adopted": False, "positions": 0, "error": str(exc)})
 
     threading.Thread(target=_do_adopt, daemon=True).start()
 
@@ -2521,10 +2942,18 @@ def on_set_mode(data):
         emit("error", {"msg": f"Invalid mode: {new_mode}"})
         return
     with _state_lock:
-        if S["trade_open"]:
-            emit("error", {"msg": "Cannot change mode while a trade is open"})
-            return
-        S["trading_mode"] = new_mode
+        blocked = S["trade_open"]
+        if not blocked:
+            S["trading_mode"] = new_mode
+    if blocked:
+        emit("error", {"msg": "Cannot change mode while a trade is open"})
+        return
+
+    # Swap every learning engine to the mode-specific state file — demo
+    # fills must never train real-money weights (and vice versa).
+    for eng in (_market_brain, _entry_analyzer, _market_intel):
+        eng.set_mode(new_mode)
+    S["exit_engine"]._exit_analyzer.set_mode(new_mode)
 
     if new_mode == "real":
         log("🔴 Switched to REAL TRADING — live orders will be placed!", "error")
@@ -2552,6 +2981,100 @@ def on_set_mode(data):
             S["day_start_capital"]   = CAPITAL
             S["exit_engine"].capital  = CAPITAL
         log("🔵 Switched to DEMO mode — paper trading only", "success")
+    broadcast()
+
+
+@socketio.on("toggle_scalp_mode")
+def on_toggle_scalp(data):
+    mode = data.get("mode", "off")
+    if mode not in ("off", "auto", "manual"):
+        mode = "off"
+    with _state_lock:
+        S["scalp_mode"] = mode
+    labels = {
+        "off":    "Scalp mode OFF — normal parameters",
+        "auto":   "SCALP AUTO — AI detects micro-moves, tight SL/trail",
+        "manual": "SCALP MANUAL — use Buy CE/PE buttons, AI manages exit",
+    }
+    lvl = "warning" if mode != "off" else "info"
+    log(f"⚡ {labels[mode]}", lvl)
+    broadcast()
+
+
+@socketio.on("scalp_manual_buy")
+def on_scalp_manual_buy(data):
+    """Manual scalp entry — user clicks Buy CE or Buy PE."""
+    side = data.get("side", "").upper()
+    if side not in ("CE", "PE"):
+        emit("error", {"msg": f"Invalid side: {side}"})
+        return
+
+    trade_opened_payload = None
+    order_intent = None
+    log_entries = []
+
+    with _state_lock:
+        err = None
+        if S["scalp_mode"] != "manual":
+            err = "Scalp manual mode not active"
+        elif S["trade_open"]:
+            err = "Trade already open"
+        elif not S["running"]:
+            err = "Robot not running — start first"
+
+        sl = _slot(side)
+        if err is None and (sl["token"] is None or sl["price"] is None):
+            err = f"No {side} option price available"
+
+        # ── HARD risk gates — manual entries are not exempt ─────────────
+        # (daily loss / drawdown / max trades / trade budget / hours /
+        # option price). Cooldown is deliberately skippable for a manual
+        # operator decision.
+        if err is None:
+            ok, gate_reason = _entry_gates_ok()
+            if not ok:
+                err = f"Blocked: {gate_reason}"
+        if err is None and not _is_valid_time():
+            err = "Blocked: outside trading hours"
+        if err is None:
+            opt_ok, opt_reason = _option_price_ok(side)
+            if not opt_ok:
+                err = f"Blocked: {opt_reason}"
+
+        if err is None:
+            nifty_price = S["nifty_price"] or 0
+
+            # Build scalp override params
+            override = {
+                "sl_pct_p1":      SCALP_SL_PHASE1_PCT,
+                "sl_pct_p2":      SCALP_SL_PHASE2_PCT,
+                "sl_phase1_secs": SCALP_SL_PHASE1_SECS,
+                "trail_pct":      SCALP_TRAIL_PCT,
+                "timeout_secs":   SCALP_TIMEOUT_SECS,
+            }
+
+            S["fast_entry"] = True
+            S["nifty_move"] = 0.0
+            S["nifty_ref"]  = nifty_price
+
+            result = _enter_trade_state(side, nifty_price, override_params=override)
+            if result:
+                trade_opened_payload = result.get("trade_opened_payload")
+                order_intent = result.get("order_intent")
+                log_entries = [("⚡ SCALP MANUAL BUY " + side, "trade")] + result.get("logs", [])
+
+    # I/O outside lock — emit() under _state_lock is the v8.1 deadlock pattern
+    if err:
+        emit("error", {"msg": err})
+        return
+
+    for msg, level in log_entries:
+        log(msg, level)
+
+    if trade_opened_payload:
+        _emitter.emit("trade_opened", trade_opened_payload)
+
+    _run_order_intent(order_intent, trade_opened_payload, None)
     broadcast()
 
 
@@ -2717,6 +3240,15 @@ def _apply_nifty_atm(atm: dict):
     if new_tokens:
         _subscribe(new_tokens)
 
+    # Meta event for the replay harness — replay applies recorded ATM tokens
+    # instead of hitting the REST API.
+    _recorder.record_meta("atm_resolved", {
+        "strike":    atm.get("strike"),
+        "expiry":    atm.get("expiry"),
+        "ce_token":  ce_token,   "pe_token":  pe_token,
+        "ce_symbol": atm.get("ce_symbol"), "pe_symbol": atm.get("pe_symbol"),
+    })
+
     # Update market intelligence with expiry info
     _market_intel.update_expiry(atm.get("expiry"))
     ctx = _market_intel.get_context()
@@ -2737,7 +3269,7 @@ def _apply_nifty_atm(atm: dict):
     )
     if rec.get("avoid_entry"):
         log(f"[INTEL] AVOID ENTRIES: {' | '.join(rec.get('reasons', []))}", "warning")
-    socketio.emit("nifty_atm_resolved", atm, namespace="/")
+    _emitter.emit("nifty_atm_resolved", atm)
     broadcast()
 
 
@@ -2777,7 +3309,7 @@ def api_nifty_historical():
     cfg      = ZERODHA_CONFIG
     enctoken = _up.unquote(cfg.get("enctoken", ""))
     user_id  = cfg.get("user_id", "")
-    today    = datetime.now().strftime("%Y-%m-%d")
+    today    = _cnow().strftime("%Y-%m-%d")
     token    = S.get("index_token", NIFTY_TOKEN)
     url = (
         f"/oms/instruments/historical/{token}/{interval}"
@@ -3003,30 +3535,41 @@ def _periodic_broadcast():
         _t.sleep(1)
         try:
             broadcast()
-        except Exception:
-            pass
+        except Exception as exc:
+            app.logger.warning(f"periodic broadcast error: {exc}")
 
 
 def _nifty_ltp_poller():
-    """Poll NIFTY spot price via REST API every 2s — always keeps nifty_price fresh."""
+    """
+    REST fallback for the NIFTY spot price — GAP-FILL ONLY.
+
+    Previously this appended a REST LTP into the same tick deques the
+    WebSocket feeds every 2 s, interleaving REST and WS prices into
+    ATR / regression / momentum (data contamination), even while stopped.
+
+    Now: if the WS delivered an index tick within the last 10 s, the poller
+    does nothing. Only when the WS is silent does it run the full ingestion
+    pipeline to keep indicators alive.
+    """
     import time as _t
+    WS_STALE_SECS = 10
     while True:
         _t.sleep(2)
         try:
+            with _state_lock:
+                ws_fresh = (_time.time() - S.get("last_ws_tick_ts", 0)) < WS_STALE_SECS
+            if ws_fresh:
+                continue
             price = _fetch_nifty_ltp()
             if price is None:
                 continue
             with _state_lock:
-                S["nifty_price"] = price
-                S["nifty_ticks"].append(price)
-                S["nifty_tick_times"].append(datetime.now())
-                _vol_detector.add(price)
-                _mtf_analyzer.add_tick(price)
-                S["nifty_atr_ticks"].append(price)
-                S["regression_slope"] = _regression_slope(list(S["nifty_ticks"]))
-                _update_jump_threshold(price)
-        except Exception:
-            pass
+                # Re-check under lock — a WS tick may have arrived meanwhile
+                if (_time.time() - S.get("last_ws_tick_ts", 0)) < WS_STALE_SECS:
+                    continue
+                _ingest_index_tick(price, full=S["running"] or S["trade_open"])
+        except Exception as exc:
+            app.logger.warning(f"NIFTY LTP poller error: {exc}")
 
 
 if __name__ == "__main__":

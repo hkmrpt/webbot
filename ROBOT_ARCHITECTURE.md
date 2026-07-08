@@ -10,6 +10,36 @@ Call or Put option, and manages exits via 10-signal AI exit engine with adaptive
 
 ---
 
+> **v9.5 REDESIGN (2026-07-08).** Major overhaul on top of this document —
+> where they disagree, the code and CLAUDE.md win:
+>
+> * **Exit precedence fixed**: hard SL → trail → partial → timeout → AI
+>   analyzer → brain decay. The AI can no longer outrank the stop-loss, and
+>   has no authority until `AI_EXIT_MIN_TRADES` closed trades (cascade_risk
+>   crash protector excepted). Exit analyzer is now 9 signals (the
+>   "adaptive_trail" placeholder was removed).
+> * **Trail**: monotonic tier table, brain influence clamped 0.7–1.3×,
+>   ratchet applied after the brain (never widens).
+> * **Partial bookings** are credited to capital/session at booking time and
+>   logged as CSV rows; `pnl_total` = remaining + partials.
+> * **Every entry path** (incl. manual scalp) passes the shared hard risk
+>   gates; MAX_TRADES_DAY is enforced; slow confirmations re-run the AI
+>   verdict at completion.
+> * **Data foundation**: always-on tick recorder (`ticks/*.jsonl.gz`) +
+>   replay harness (`python -m replay.replay --date YYYYMMDD`) that runs the
+>   exact strategy code with sim clock / paper broker / isolated state.
+> * **ML repairs**: side-relative regime alignment feature, Welford init and
+>   normalization-leakage fixes, class-imbalance weighting, symmetric
+>   discriminative entry-weight learning, exit-signal attribution (learn only
+>   from AI-caused exits), fake Greeks + option_chain dimensions neutralized
+>   (display-only), mode-tagged state files (demo/real separated). The stale
+>   7-feature brain state is archived in `state_archive/`.
+> * **Infra**: injectable IST clock (`core/clock.py`), broker/emitter seams
+>   (`core/`), incremental O(1) indicators (`engine/indicators.py`),
+>   throttled broadcasts with TTL-cached slow payload, REST poller quarantined
+>   to gap-fill, NIFTY weekly expiry weekday configurable (Tuesday).
+> * **Tests**: `python -m pytest tests/` (50 tests).
+
 ## ENTRY PIPELINE
 
 Every NIFTY tick passes through 11 sequential gates. ALL must pass for a trade to open.

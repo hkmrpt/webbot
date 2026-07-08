@@ -110,6 +110,28 @@
         <button class="btn btn-exit" id="exitBtn" onclick="manualExit()">🚨 Exit Trade Now</button>
       </div>
 
+      <!-- Scalp Mode Selector -->
+      <div class="adopt-toggle-row" id="scalpRow">
+        <div class="adopt-left">
+          <span class="adopt-label">Scalp Mode</span>
+          <span class="adopt-sub" id="scalpSub">Tight SL/trail for capturing small moves</span>
+        </div>
+        <div class="scalp-pills">
+          <button class="scalp-pill active" id="scalpOff"    onclick="setScalpMode('off')">OFF</button>
+          <button class="scalp-pill"        id="scalpAuto"   onclick="setScalpMode('auto')">AUTO</button>
+          <button class="scalp-pill"        id="scalpManual" onclick="setScalpMode('manual')">MANUAL</button>
+        </div>
+      </div>
+      <div class="scalp-status" id="scalpStatus" style="display:none">
+        <span class="adopt-dot active" id="scalpDot"></span>
+        <span id="scalpMsg">Scalp: SL=3% Trail=2.5% Timeout=20s</span>
+      </div>
+      <!-- Manual Scalp Buy Buttons (shown only in manual mode) -->
+      <div class="scalp-manual-btns" id="scalpManualBtns" style="display:none">
+        <button class="btn scalp-buy-ce" id="scalpBuyCE" onclick="scalpBuy('CE')">Buy CE</button>
+        <button class="btn scalp-buy-pe" id="scalpBuyPE" onclick="scalpBuy('PE')">Buy PE</button>
+      </div>
+
       <!-- Adopt Open Positions Toggle -->
       <div class="adopt-toggle-row" id="adoptRow" style="display:none">
         <div class="adopt-left">
@@ -405,6 +427,7 @@
       <div class="lvl-tag lvl-entry" id="tagEntry">ENTRY</div>
       <div class="lvl-tag lvl-sl"    id="tagSL">SL</div>
       <div class="lvl-tag lvl-trail" id="tagTrail">TRAIL</div>
+      <div class="lvl-tag lvl-tp"    id="tagTP">TP</div>
     </div>
   </div>
 

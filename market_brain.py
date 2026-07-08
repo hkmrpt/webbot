@@ -30,7 +30,23 @@ import os
 from collections import deque
 from datetime import datetime
 
+
+# State dir anchored next to the module (or exe when frozen) so learned state
+# never silently lands in a different working directory. The replay harness
+# overrides STATE_DIR to isolate its runs from live state.
+import sys as _sys
+STATE_DIR = (os.path.dirname(os.path.abspath(_sys.executable))
+             if getattr(_sys, "frozen", False)
+             else os.path.dirname(os.path.abspath(__file__)))
 BRAIN_STATE_FILE = "brain_state.json"
+
+def _state_path(mode: str = "") -> str:
+    """Per-mode state file (brain_state_demo.json / brain_state_real.json) —
+    frictionless demo fills must never pollute real-money weights."""
+    if mode:
+        base, ext = os.path.splitext(BRAIN_STATE_FILE)
+        return os.path.join(STATE_DIR, f"{base}_{mode}{ext}")
+    return os.path.join(STATE_DIR, BRAIN_STATE_FILE)
 N_FEATURES       = 9
 
 # ── Logistic helpers ──────────────────────────────────────────────────────────
@@ -49,7 +65,10 @@ class RunningStats:
         self.n     = n
         self.count = 0
         self.mean  = [0.0] * n
-        self._M2   = [1.0] * n   # sum of squared deviations (Welford)
+        # Welford's M2 starts at 0 (sum of squared deviations of ZERO samples).
+        # The old init of 1.0 was a phantom unit of variance that under-scaled
+        # every feature for the first dozen trades.
+        self._M2   = [0.0] * n
 
     def update(self, x: list):
         self.count += 1
@@ -66,8 +85,12 @@ class RunningStats:
                 std = math.sqrt(self._M2[i] / (self.count - 1))
             else:
                 std = 1.0
-            std = max(std, 1e-6)
-            result.append((x[i] - self.mean[i]) / std)
+            if std < 1e-8:
+                # (Near-)constant feature carries no information — emit 0
+                # instead of exploding to a huge z-score via a tiny epsilon.
+                result.append(0.0)
+            else:
+                result.append((x[i] - self.mean[i]) / std)
         return result
 
     def to_dict(self) -> dict:
@@ -76,12 +99,12 @@ class RunningStats:
     def from_dict(self, d: dict):
         self.count = d.get("count", 0)
         loaded_mean = d.get("mean", [0.0] * self.n)
-        loaded_m2   = d.get("M2",   [1.0] * self.n)
+        loaded_m2   = d.get("M2",   [0.0] * self.n)
         # Extend if feature count grew
         if len(loaded_mean) < self.n:
             loaded_mean.extend([0.0] * (self.n - len(loaded_mean)))
         if len(loaded_m2) < self.n:
-            loaded_m2.extend([1.0] * (self.n - len(loaded_m2)))
+            loaded_m2.extend([0.0] * (self.n - len(loaded_m2)))
         self.mean = loaded_mean[:self.n]
         self._M2  = loaded_m2[:self.n]
 
@@ -116,10 +139,15 @@ class OnlineLR:
         z = sum(self.weights[i] * x_norm[i] for i in range(N_FEATURES)) + self.bias
         return _sigmoid(z)
 
-    def update(self, x_norm: list, label: int):
-        """Perform one gradient-descent step."""
+    def update(self, x_norm: list, label: int, sample_weight: float = 1.0):
+        """Perform one gradient-descent step.
+
+        sample_weight balances class imbalance (importance weighting): with a
+        17% win rate the unweighted model collapses to "always predict loss"
+        via the bias term and never becomes discriminative.
+        """
         p     = self.predict(x_norm)
-        error = label - p
+        error = (label - p) * sample_weight
         lr    = self.LEARNING_RATE
 
         for i in range(N_FEATURES):
@@ -132,6 +160,15 @@ class OnlineLR:
         self.n_trades += 1
         if label == 1:
             self.n_wins += 1
+
+    def class_weight(self, label: int) -> float:
+        """Balanced importance weight n/(2·n_class), clamped to [0.5, 3.0]."""
+        if self.n_trades < 4:
+            return 1.0
+        n_class = self.n_wins if label == 1 else (self.n_trades - self.n_wins)
+        if n_class <= 0:
+            return 3.0
+        return max(0.5, min(3.0, self.n_trades / (2.0 * n_class)))
 
     @property
     def win_rate(self) -> float:
@@ -243,20 +280,31 @@ class FeatureBuilder:
       3  time_of_day     minutes since 9:15 / 375               → 0–1
       4  atr_pct         NIFTY ATR / price * 100                → volatility
       5  fast_entry      1.0 if fast entry, 0.0 if confirmed
-      6  regime_enc      trending=1.0, choppy=−1.0, volatile=0.5, unknown=0
+      6  regime_align    SIDE-RELATIVE regime alignment:
+                          +1 trend favours the trade side, −1 against,
+                          −0.5 choppy, +0.25 volatile, 0 unknown
+                         (the old encoding mapped trending_up AND
+                          trending_down both to 1.0 — trend sign destroyed)
       7  rsi             RSI over last 14 ticks (0–100)          → overbought/oversold
       8  range_position  position in session high-low (0–1)       → extremes
     """
 
-    REGIME_ENC = {
-        "trending_up":   1.0,
-        "trending_down": 1.0,   # strong trend, just different direction
-        "choppy":       -1.0,
-        "volatile":      0.5,
-        "unknown":       0.0,
-    }
     MARKET_OPEN = 9 * 60 + 15    # 9:15 in minutes
     MARKET_MINS = 375            # total trading minutes
+
+    @staticmethod
+    def regime_alignment(regime: str, side: str) -> float:
+        """Side-relative regime encoding — the feature the model actually
+        needs to separate with-trend entries from against-trend ones."""
+        if regime == "trending_up":
+            return 1.0 if side == "CE" else -1.0
+        if regime == "trending_down":
+            return 1.0 if side == "PE" else -1.0
+        if regime == "choppy":
+            return -0.5
+        if regime == "volatile":
+            return 0.25
+        return 0.0
 
     def build(
         self,
@@ -268,6 +316,7 @@ class FeatureBuilder:
         nifty_atr:    float,
         fast_entry:   bool,
         regime:       str,
+        side:         str = "CE",
         rsi:          float = 50.0,
         range_position: float = 0.5,
     ) -> list:
@@ -284,8 +333,9 @@ class FeatureBuilder:
         else:
             velocity = 0.0
 
-        # 3 — time of day
-        now        = datetime.now()
+        # 3 — time of day (injectable IST clock — correct on any host + replay)
+        from core.clock import now as _now
+        now        = _now()
         mins_today = now.hour * 60 + now.minute
         time_norm  = max(0.0, min(1.0, (mins_today - self.MARKET_OPEN) / self.MARKET_MINS))
 
@@ -295,8 +345,8 @@ class FeatureBuilder:
         # 5 — fast entry flag
         fast_flag = 1.0 if fast_entry else 0.0
 
-        # 6 — regime encoding
-        regime_enc = self.REGIME_ENC.get(regime, 0.0)
+        # 6 — regime alignment (side-relative, sign preserved)
+        regime_enc = self.regime_alignment(regime, side)
 
         # 7 — RSI (already 0-100 scale, normalize in pipeline)
         rsi_val = float(rsi)
@@ -330,13 +380,27 @@ class MarketBrain:
     # PnL% to call a trade a "win" for learning purposes
     WIN_THRESHOLD_PCT = 0.8           # was 1.5 — account for transaction costs
 
-    def __init__(self):
+    def __init__(self, mode: str | None = None):
+        from config import TRADING_MODE
+        self._mode     = mode or TRADING_MODE
         self._lr       = OnlineLR()
         self._stats    = RunningStats(N_FEATURES)
         self._regime   = MarketRegimeDetector()
         self._features = FeatureBuilder()
         self._last_raw_features: list | None = None
+        self._last_x_norm:       list | None = None
         self._last_regime:       str         = "unknown"
+        self._load()
+
+    def set_mode(self, mode: str):
+        """Switch demo/real: persist the current mode's state, then load the
+        other mode's state fresh."""
+        if mode == self._mode:
+            return
+        self._save()
+        self._mode  = mode
+        self._lr    = OnlineLR()
+        self._stats = RunningStats(N_FEATURES)
         self._load()
 
     # ── Public API ────────────────────────────────────────────────────────────
@@ -351,6 +415,7 @@ class MarketBrain:
         """
         regime = self._regime.classify(state.get("nifty_ticks", []))
         self._last_regime = regime
+        side = state.get("side", "CE")
 
         raw = self._features.build(
             spike_pts      = abs(state.get("nifty_move", 0) or 0),
@@ -361,18 +426,23 @@ class MarketBrain:
             nifty_atr      = state.get("jump_atr", 0) or 0,
             fast_entry     = state.get("fast_entry", False),
             regime         = regime,
+            side           = side,
             rsi            = state.get("rsi", 50.0),
             range_position = state.get("range_position", 0.5),
         )
 
-        self._stats.update(raw)
+        # Normalize with PRE-update stats, then fold the sample in — the old
+        # order normalized each sample with stats that already contained it
+        # (self-inclusion leakage). The normalized vector is stored so
+        # training uses exactly what was scored (no distribution mismatch).
         x_norm = self._stats.normalize(raw)
+        self._stats.update(raw)
         score  = self._lr.predict(x_norm)
 
         self._last_raw_features = raw
+        self._last_x_norm       = x_norm
 
         # Side vs regime conflict check
-        side = state.get("side", "CE")
         if regime == "trending_down" and side == "CE":
             return score, False, f"AI: market trending DOWN — skip CE (score={score:.2f})"
         if regime == "trending_up" and side == "PE":
@@ -395,13 +465,22 @@ class MarketBrain:
         """
         if self._last_raw_features is None:
             return
+        # Mode isolation: never learn from a trade made in a different
+        # trading mode (frictionless demo fills must not train real weights).
+        if result.get("mode") and result["mode"] != self._mode:
+            self._last_raw_features = None
+            self._last_x_norm       = None
+            return
 
+        # Use pnl_total when partial bookings occurred — the trade's real outcome
         pnl_pct = result.get("pnl_pct", 0.0) or 0.0
         label   = 1 if pnl_pct >= self.WIN_THRESHOLD_PCT else 0
 
-        x_norm = self._stats.normalize(self._last_raw_features)
-        self._lr.update(x_norm, label)
+        # Train on the exact vector that was scored (stored at entry time)
+        x_norm = self._last_x_norm or self._stats.normalize(self._last_raw_features)
+        self._lr.update(x_norm, label, self._lr.class_weight(label))
         self._last_raw_features = None
+        self._last_x_norm       = None
         self._save()
 
     def get_regime(self, nifty_ticks: list) -> str:
@@ -417,9 +496,10 @@ class MarketBrain:
             "last_regime":      self._last_regime,
             "weights":          [round(w, 4) for w in self._lr.weights],
             "bias":             round(self._lr.bias, 4),
+            "mode":             self._mode,
             "feature_names":    [
                 "spike_strength", "slope", "nifty_velocity",
-                "time_of_day", "atr_pct", "fast_entry", "regime",
+                "time_of_day", "atr_pct", "fast_entry", "regime_align",
                 "rsi", "range_position"
             ],
         }
@@ -431,17 +511,18 @@ class MarketBrain:
             data = {
                 "lr":    self._lr.to_dict(),
                 "stats": self._stats.to_dict(),
+                "mode":  self._mode,
             }
-            with open(BRAIN_STATE_FILE, "w") as f:
+            with open(_state_path(self._mode), "w") as f:
                 json.dump(data, f, indent=2)
         except Exception as e:
             print(f"[MarketBrain] save error: {e}")
 
     def _load(self):
-        if not os.path.exists(BRAIN_STATE_FILE):
+        if not os.path.exists(_state_path(self._mode)):
             return
         try:
-            with open(BRAIN_STATE_FILE) as f:
+            with open(_state_path(self._mode)) as f:
                 data = json.load(f)
             self._lr.from_dict(data.get("lr", {}))
             self._stats.from_dict(data.get("stats", {}))

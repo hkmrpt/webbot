@@ -8,8 +8,10 @@ Trail logic:
                     activates once PEAK profit ≥ threshold
   - Time trail:     starts at TRAIL_TIME_START_PCT, tightens by TRAIL_TIME_TIGHTEN_STEP
                     every TRAIL_TIME_TIGHTEN_SECS after profit threshold hit
-  - Combined:       min(atr_trail, tier_trail, time_trail)
-  - Ratchet:        disabled — trail widens intentionally as profit grows
+  - Combined:       min(atr_trail, tier_trail, time_trail), then ExitBrain
+                    nudges it within [BRAIN_TRAIL_MIN_FACTOR, BRAIN_TRAIL_MAX_FACTOR]
+  - Ratchet:        applied AFTER the brain — once tightened, never widens
+                    (TRAIL_RATCHET_ENABLED)
   - Trail price:    high-water mark, never goes backward
   - Floor:          trail price always ≥ entry price
   - Breakeven:      SL moved to entry once peak profit ≥ BREAKEVEN_TRIGGER_PCT
@@ -17,10 +19,14 @@ Trail logic:
 """
 
 import csv
+import json
 import os
+import sys
 import threading
 from collections import deque
 from datetime import datetime
+
+from core.clock import now as _now
 
 from exit_brain import ExitBrain
 from exit_analyzer import ExitAnalyzer
@@ -38,15 +44,17 @@ from config import (
     TRAIL_TIME_TIGHTEN_STEP, TRAIL_TIME_MIN_PCT,
     SL_PHASE1_PCT, SL_PHASE1_SECS, SL_PHASE2_PCT,
     MOVE_VELOCITY_WINDOW, FAST_MOVE_VELOCITY,
-    SLOW_MOVE_TRAIL_CAP, FAST_MOVE_TRAIL_FLOOR,
-    SLOW_MOVE_TIMEOUT_SECS, SLOW_MOVE_MIN_PROFIT,
-    FAST_MOVE_TIMEOUT_SECS, FAST_MOVE_MIN_PROFIT,
     PARTIAL_BOOKING_ENABLED, PARTIAL_BOOKING_TARGETS,
-    VOLUME_DRYUP_EXIT, VOLUME_DRYUP_RATIO, VOLUME_DRYUP_MIN_PROFIT,
-    MOMENTUM_STALL_EXIT, MOMENTUM_STALL_TICKS, MOMENTUM_STALL_MIN_PROFIT,
 )
 
 _csv_lock = threading.Lock()
+
+# Log dir anchored next to the module (or exe when frozen). A bare relative
+# TRADE_LOG silently wrote to whatever the process cwd happened to be — the
+# root cause of the near-empty trade_log.csv. Tests may override LOG_DIR.
+LOG_DIR = (os.path.dirname(os.path.abspath(sys.executable))
+           if getattr(sys, "frozen", False)
+           else os.path.dirname(os.path.abspath(__file__)))
 
 CSV_FIELDS = [
     "date", "time", "symbol", "option_symbol", "side", "entry", "exit_price",
@@ -61,13 +69,47 @@ CSV_FIELDS = [
     "peak_profit_pct",
     "held_secs",
     "equity_after",
+    # ── v2 columns (ML-joinable metadata) ──
+    "mode",                  # demo | real  (at entry)
+    "row_type",              # full | partial
+    "partial_realized_pnl",  # cumulative partial P&L booked before final close
+    "pnl_total",             # pnl + partial_realized_pnl (full rows only)
+    "ai_entry_score",        # MarketBrain score at entry
+    "entry_analyzer_score",  # EntryAnalyzer composite at entry
+    "entry_grade",           # A/B/C/D/F
+    "regime",                # market regime at entry
+    "scalp_mode",            # off | auto | manual (at entry)
+    "nifty_entry",           # NIFTY level at entry
+    "nifty_exit",            # NIFTY level at exit
+    "entry_verdict_json",    # compact entry verdict snapshot
+    "exit_signals_json",     # last-fired AI exit signals snapshot
 ]
 
 
+def _log_path() -> str:
+    return TRADE_LOG if os.path.isabs(TRADE_LOG) else os.path.join(LOG_DIR, TRADE_LOG)
+
+
+def _rotate_legacy_log(path: str):
+    """If an existing log has an old (different) header, rename it aside so
+    the new schema starts clean instead of appending mismatched rows."""
+    try:
+        with open(path, newline="") as f:
+            first = f.readline().strip()
+        if first and first != ",".join(CSV_FIELDS):
+            base, ext = os.path.splitext(path)
+            n = 1
+            while os.path.exists(f"{base}_legacy{n}{ext}"):
+                n += 1
+            os.rename(path, f"{base}_legacy{n}{ext}")
+    except OSError:
+        pass
+
+
 def write_trade_csv(result: dict):
-    """Append one trade row to TRADE_LOG. Thread-safe."""
-    path = TRADE_LOG
-    now  = datetime.now()
+    """Append one trade row to the anchored trade log. Thread-safe."""
+    path = _log_path()
+    now  = _now()
     row  = {
         "date":                 now.strftime("%Y-%m-%d"),
         "time":                 now.strftime("%H:%M:%S"),
@@ -77,7 +119,7 @@ def write_trade_csv(result: dict):
         "entry":                result.get("entry",            ""),
         "exit_price":           result.get("exit_price",       ""),
         "qty":                  result.get("qty",              ""),
-        "lot_qty":              (result.get("qty", 0) or 0) * LOT_SIZE,
+        "lot_qty":              (result.get("qty", 0) or 0) * result.get("lot_size", LOT_SIZE),
         "pnl":                  result.get("pnl",              ""),
         "pnl_pct":              result.get("pnl_pct",          ""),
         "reason":               result.get("reason",           ""),
@@ -91,8 +133,23 @@ def write_trade_csv(result: dict):
         "peak_profit_pct":      result.get("peak_profit_pct",  ""),
         "held_secs":            result.get("held_secs",        ""),
         "equity_after":         result.get("equity_after",     ""),
+        "mode":                 result.get("mode",             ""),
+        "row_type":             result.get("row_type",         "full"),
+        "partial_realized_pnl": result.get("partial_realized_pnl", ""),
+        "pnl_total":            result.get("pnl_total",        ""),
+        "ai_entry_score":       result.get("ai_entry_score",   ""),
+        "entry_analyzer_score": result.get("entry_analyzer_score", ""),
+        "entry_grade":          result.get("entry_grade",      ""),
+        "regime":               result.get("regime",           ""),
+        "scalp_mode":           result.get("scalp_mode",       ""),
+        "nifty_entry":          result.get("nifty_entry",      ""),
+        "nifty_exit":           result.get("nifty_exit",       ""),
+        "entry_verdict_json":   result.get("entry_verdict_json", ""),
+        "exit_signals_json":    result.get("exit_signals_json", ""),
     }
     with _csv_lock:
+        if os.path.exists(path) and os.path.getsize(path) > 0:
+            _rotate_legacy_log(path)
         is_new = not os.path.exists(path) or os.path.getsize(path) == 0
         with open(path, "a", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
@@ -187,8 +244,10 @@ class BuyExitStrategy:
         self._exit_analyzer      = ExitAnalyzer()      # 10-signal exit analysis engine
         self._partial_done: list = []                   # indices of partial targets already booked
         self._original_qty: int  = 1                    # qty at open (before any partial sells)
-        self._no_new_high_count: int = 0                # ticks since last new high
         self._profit_history: list = []                 # profit % each tick for decay detection
+        # Market context the app keeps updated (e.g. live NIFTY level) so
+        # close results can be enriched without the engine doing any I/O.
+        self.market_ctx: dict    = {}
 
     def open_leg(
         self,
@@ -203,6 +262,8 @@ class BuyExitStrategy:
         symbol:                  str         = "",
         option_symbol:           str         = "",
         qty_override:            int  | None = None,
+        lot_size:                int  | None = None,
+        meta:                    dict | None = None,
         **_kwargs,
     ) -> dict:
         sl_pct = sl_pct_override if sl_pct_override is not None else SL_PHASE1_PCT
@@ -220,8 +281,10 @@ class BuyExitStrategy:
         qty = qty_override if (qty_override is not None and qty_override >= 1) else BUY_QTY
         self._partial_done  = []
         self._original_qty  = qty
-        self._no_new_high_count = 0
         self._profit_history = []
+        # Defensive: momentum/profit history must never leak from a previous
+        # trade into this one (contaminates the adaptive trail at open).
+        self._brain.reset_trade_state()
 
         self._leg = {
             "side":                 side,
@@ -229,6 +292,9 @@ class BuyExitStrategy:
             "option_symbol":        option_symbol,
             "entry":                entry_price,
             "qty":                  qty,
+            "lot_size":             int(lot_size) if lot_size else LOT_SIZE,
+            "partial_realized_pnl": 0.0,
+            "meta":                 dict(meta) if meta else {},
             "sl":                   sl,
             "sl_pct":               sl_pct,
             "trail_pct":            init_trail,
@@ -250,7 +316,7 @@ class BuyExitStrategy:
             "_timeout_secs":        timeout_secs_override,
             "open":                 True,
         }
-        self._open_time = datetime.now()
+        self._open_time = _now()
 
         return {"sl": sl, "qty": qty, "sl_pct": sl_pct, "trail_pct": init_trail}
 
@@ -259,8 +325,8 @@ class BuyExitStrategy:
             return None
 
         leg      = self._leg
-        qty_full = leg["qty"] * LOT_SIZE
-        elapsed  = (datetime.now() - self._open_time).total_seconds() if self._open_time else 0
+        qty_full = leg["qty"] * leg["lot_size"]
+        elapsed  = (_now() - self._open_time).total_seconds() if self._open_time else 0
 
         self._opt_price_hist.append(price)
 
@@ -274,9 +340,6 @@ class BuyExitStrategy:
             leg["peak_price"]      = price
             leg["peak_profit"]     = round((price - leg["entry"]) * qty_full, 2)
             leg["peak_profit_pct"] = round((price - leg["entry"]) / leg["entry"] * 100, 2)
-            self._no_new_high_count = 0  # reset on new high
-        else:
-            self._no_new_high_count += 1
 
         if not leg["phase2"] and price > leg["entry"]:
             leg["phase2"] = True
@@ -332,15 +395,19 @@ class BuyExitStrategy:
             candidates.append(t_trail)
         combined = round(min(candidates), 1)
 
+        # ── AI Brain: adaptive trail ────────────────────────────────────────
+        # Brain uses momentum score + self-learned multiplier (clamped to
+        # [BRAIN_TRAIL_MIN_FACTOR, BRAIN_TRAIL_MAX_FACTOR]) to nudge the trail.
+        # High momentum → wider trail (let it run).
+        # Low momentum  → tight trail (protect gains fast).
+        combined = self._brain.adaptive_trail(combined, momentum_score)
+
+        # Ratchet AFTER the brain so the guarantee holds: once the trail has
+        # tightened, no brain widening can loosen it again.
         if TRAIL_RATCHET_ENABLED:
             combined = round(min(combined, leg["min_trail_pct_reached"]), 1)
             leg["min_trail_pct_reached"] = combined
 
-        # ── AI Brain: adaptive trail ────────────────────────────────────────
-        # Brain uses momentum score + self-learned multiplier to widen/tighten.
-        # High momentum → wider trail (let it run).
-        # Low momentum  → tight trail (protect gains fast).
-        combined         = self._brain.adaptive_trail(combined, momentum_score)
         leg["trail_pct"] = combined
 
         if leg["phase2"]:
@@ -349,18 +416,37 @@ class BuyExitStrategy:
             prev_trail = leg["trail_price"] or leg["entry"]
             leg["trail_price"] = max(new_trail, prev_trail)
 
-        # Exit checks
-        # Per-stock timeout override, or default move-type based timeout
-        if leg["_timeout_secs"] is not None:
-            timeout_secs   = leg["_timeout_secs"]
-            min_profit_pct = SLOW_MOVE_MIN_PROFIT    # keep profit floor
-        else:
-            timeout_secs   = FAST_MOVE_TIMEOUT_SECS if move_type == "fast" else SLOW_MOVE_TIMEOUT_SECS
-            min_profit_pct = FAST_MOVE_MIN_PROFIT    if move_type == "fast" else SLOW_MOVE_MIN_PROFIT
+        # Timeout: per-trade override (the entry verdict always supplies one),
+        # config default as safety net. The old move-type timeout branch was
+        # unreachable — every entry path passes a timeout override.
+        timeout_secs   = leg["_timeout_secs"] if leg["_timeout_secs"] is not None else TRADE_TIMEOUT_SECS
+        min_profit_pct = TRADE_TIMEOUT_MIN_PROFIT
 
-        # ── Partial profit booking ──────────────────────────────────────────────
-        # Check before full exit — book a fraction at profit milestones,
-        # then continue trailing the rest with a tightened SL.
+        # Track profit history for decay detection
+        self._profit_history.append(current_pct)
+        if len(self._profit_history) > 30:
+            self._profit_history = self._profit_history[-30:]
+
+        # ═════════════════════════════════════════════════════════════════
+        # EXIT PRECEDENCE — hard risk rules FIRST, learned signals LAST:
+        #   1. hard SL          (never outranked by anything)
+        #   2. trailing stop
+        #   3. partial booking  (only reached if no hard exit this tick)
+        #   4. timeout
+        #   5. AI analyzer      (warmup-gated inside ExitAnalyzer)
+        #   6. brain decay      (warmup-gated inside ExitBrain)
+        # ═════════════════════════════════════════════════════════════════
+
+        # 1. Hard stop-loss
+        if price <= leg["sl"]:
+            return self._close(price, "sl")
+
+        # 2. Trailing stop
+        if leg["phase2"] and leg["trail_price"] and price <= leg["trail_price"]:
+            return self._close(price, "trail")
+
+        # 3. Partial profit booking — book a fraction at profit milestones,
+        #    credit the realized P&L, then continue trailing the rest.
         if PARTIAL_BOOKING_ENABLED and leg["qty"] > 1:
             for i, (target_pct, fraction) in enumerate(PARTIAL_BOOKING_TARGETS):
                 if i not in self._partial_done and peak_pct >= target_pct:
@@ -369,34 +455,57 @@ class BuyExitStrategy:
                     if sell_qty < leg["qty"]:
                         self._partial_done.append(i)
                         leg["qty"] -= sell_qty
+                        # Realized P&L of the sold portion — credited NOW so
+                        # equity and the final close never lose it.
+                        realized = round((price - leg["entry"]) * sell_qty * leg["lot_size"], 2)
+                        leg["partial_realized_pnl"] = round(
+                            leg["partial_realized_pnl"] + realized, 2)
+                        self.capital = round(self.capital + realized, 2)
                         # After partial, tighten SL to lock in the gained profit
                         lock_pct     = max(BREAKEVEN_TRIGGER_PCT, target_pct * 0.40)
                         locked_sl    = round(leg["entry"] * (1 + lock_pct / 100), 2)
                         leg["sl"]    = max(leg["sl"], locked_sl)
-                        return {
+                        event = {
                             "event_type":      "partial",
                             "partial_qty":     sell_qty,
                             "remaining_qty":   leg["qty"],
                             "price":           price,
+                            "partial_pnl":     realized,
                             "peak_profit_pct": peak_pct,
                             "reason":          f"partial_{i + 1}",
                             "side":            leg["side"],
                             "symbol":          leg.get("symbol", ""),
                             "option_symbol":   leg.get("option_symbol", ""),
                             "entry":           leg["entry"],
+                            "lot_size":        leg["lot_size"],
                             "new_sl":          leg["sl"],
+                            "equity_after":    self.capital,
                         }
+                        try:
+                            write_trade_csv({
+                                **{k: leg.get(k, "") for k in
+                                   ("side", "symbol", "option_symbol", "entry", "lot_size")},
+                                "exit_price":   price,
+                                "qty":          sell_qty,
+                                "pnl":          realized,
+                                "pnl_pct":      round((price - leg["entry"]) / leg["entry"] * 100, 2),
+                                "reason":       event["reason"],
+                                "row_type":     "partial",
+                                "equity_after": self.capital,
+                                "peak_profit_pct": peak_pct,
+                                "held_secs":    int(elapsed),
+                                **leg.get("meta", {}),
+                            })
+                        except Exception as e:
+                            print(f"[CSV] partial write error: {e}")
+                        return event
 
-        reason = None
+        # 4. Timeout
+        if elapsed >= timeout_secs and current_pct < min_profit_pct:
+            return self._close(price, "timeout")
 
-        # Track profit history for decay detection
-        self._profit_history.append(current_pct)
-        if len(self._profit_history) > 30:
-            self._profit_history = self._profit_history[-30:]
-
-        # ── 10-Signal AI Exit Analyzer ──────────────────────────────────
-        # Runs all advanced exit signals: volatility spike, reversal patterns,
-        # momentum collapse, profit decay, gamma trap, cascade risk, etc.
+        # 5. 10-Signal AI Exit Analyzer (no authority during warmup — only the
+        #    mechanical cascade_risk crash protector stays live)
         ai_exit, ai_exit_reason = self._exit_analyzer.check(
             prices=list(self._opt_price_hist),
             entry=leg["entry"],
@@ -408,22 +517,13 @@ class BuyExitStrategy:
             opt_price=price,
         )
         if ai_exit:
-            reason = "ai_analyzer"
             leg["_ai_exit_detail"] = ai_exit_reason
+            return self._close(price, "ai_analyzer")
 
-        # ── Core exit checks (SL, trail, timeout) ──────────────────────
-        if reason is None and price <= leg["sl"]:
-            reason = "sl"
-        elif reason is None and leg["phase2"] and leg["trail_price"] and price <= leg["trail_price"]:
-            reason = "trail"
-        elif reason is None and elapsed >= timeout_secs:
-            if current_pct < min_profit_pct:
-                reason = "timeout"
-        elif reason is None and self._brain.check_ai_exit(current_pct, momentum_score):
-            reason = "ai_exit"
+        # 6. Brain profit-decay exit (warmup-gated)
+        if self._brain.check_ai_exit(current_pct, momentum_score):
+            return self._close(price, "ai_exit")
 
-        if reason:
-            return self._close(price, reason)
         return None
 
     def force_close(self, price: float, reason: str = "manual"):
@@ -433,16 +533,29 @@ class BuyExitStrategy:
 
     def _close(self, exit_price: float, reason: str) -> dict:
         leg      = self._leg
-        qty_full = leg["qty"] * LOT_SIZE
+        qty_full = leg["qty"] * leg["lot_size"]
         pnl      = round((exit_price - leg["entry"]) * qty_full, 2)
         pnl_pct  = round((exit_price - leg["entry"]) / leg["entry"] * 100, 2)
+        partial  = leg.get("partial_realized_pnl", 0.0) or 0.0
 
+        # Partial P&L was already credited to capital at booking time —
+        # only the remaining quantity's P&L is credited here.
         self.capital = round(self.capital + pnl, 2)
         leg["open"]  = False
 
         held_secs = 0
         if self._open_time:
-            held_secs = int((datetime.now() - self._open_time).total_seconds())
+            held_secs = int((_now() - self._open_time).total_seconds())
+
+        # Compact snapshot of the AI exit signals at the final tick
+        try:
+            sig_json = json.dumps({
+                k: round(v["urgency"], 2)
+                for k, v in (self._exit_analyzer._last_signals or {}).items()
+                if v["fire"]
+            })
+        except Exception:
+            sig_json = ""
 
         result = {
             "side":                 leg["side"],
@@ -451,8 +564,11 @@ class BuyExitStrategy:
             "entry":                leg["entry"],
             "exit_price":           exit_price,
             "qty":                  leg["qty"],
+            "lot_size":             leg["lot_size"],
             "pnl":                  pnl,
             "pnl_pct":              pnl_pct,
+            "partial_realized_pnl": partial,
+            "pnl_total":            round(pnl + partial, 2),
             "reason":               reason,
             "equity_after":         self.capital,
             "sl_pct":               leg["sl_pct"],
@@ -464,6 +580,10 @@ class BuyExitStrategy:
             "peak_profit":          leg["peak_profit"],
             "peak_profit_pct":      leg["peak_profit_pct"],
             "held_secs":            held_secs,
+            "row_type":             "full",
+            "nifty_exit":           self.market_ctx.get("nifty", ""),
+            "exit_signals_json":    sig_json,
+            **leg.get("meta", {}),
         }
 
         try:
@@ -488,7 +608,7 @@ class BuyExitStrategy:
             return {}
         held = 0
         if self._open_time:
-            held = int((datetime.now() - self._open_time).total_seconds())
+            held = int((_now() - self._open_time).total_seconds())
         return {
             "side":                 self._leg["side"],
             "entry":                self._leg["entry"],
@@ -508,6 +628,7 @@ class BuyExitStrategy:
             "trail_price":          self._leg["trail_price"],
             "phase2":               self._leg["phase2"],
             "move_type":            self._leg["move_type"],
+            "partial_realized_pnl": self._leg.get("partial_realized_pnl", 0.0),
             "momentum_score":       self._leg.get("momentum_score", 0.5),
             "brain":                self._brain.state,
             "exit_analyzer":        self._exit_analyzer.state,
@@ -522,5 +643,4 @@ class BuyExitStrategy:
         self._trail_pct_override = None
         self._partial_done       = []
         self._original_qty       = 1
-        self._no_new_high_count  = 0
         self._profit_history     = []

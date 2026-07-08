@@ -16,6 +16,11 @@ No external ML library needed — pure online statistics.
 import math
 from collections import deque
 
+from config import (
+    AI_EXIT_MIN_TRADES,
+    BRAIN_TRAIL_MIN_FACTOR, BRAIN_TRAIL_MAX_FACTOR,
+)
+
 
 # ── Momentum Scorer ───────────────────────────────────────────────────────────
 
@@ -33,6 +38,12 @@ class MomentumScorer:
         self._vel_win   = velocity_window
         self._accel_win = accel_window
         self._vel_hist  = deque(maxlen=accel_window)
+
+    def reset(self):
+        """Clear per-trade state. MUST be called between trades — otherwise the
+        acceleration component of a new trade is contaminated by the previous
+        option's velocity history."""
+        self._vel_hist.clear()
 
     def score(self, prices: deque) -> float:
         lst = list(prices)
@@ -102,9 +113,14 @@ class AdaptiveTrailEngine:
         """
         momentum_score 0→1 maps to a momentum_factor 0.5→1.5.
         Combined with learned multiplier and base trail.
+        The combined factor is clamped to [BRAIN_TRAIL_MIN_FACTOR,
+        BRAIN_TRAIL_MAX_FACTOR] so the brain can only nudge the tier/ATR/time
+        trail — never overpower it (previously effective range was 0.25×–3.0×).
         """
         momentum_factor = 0.5 + momentum_score          # 0.5 (tight) → 1.5 (wide)
-        adaptive = base_trail * momentum_factor * self._multiplier
+        factor   = momentum_factor * self._multiplier
+        factor   = min(max(factor, BRAIN_TRAIL_MIN_FACTOR), BRAIN_TRAIL_MAX_FACTOR)
+        adaptive = base_trail * factor
         return round(min(max(adaptive, self.MIN_TRAIL), self.MAX_TRAIL), 1)
 
     def on_trade_closed(self, result: dict):
@@ -163,6 +179,13 @@ class ExitBrain:
         self._scorer  = MomentumScorer()
         self._engine  = AdaptiveTrailEngine()
         self._profit_hist = deque(maxlen=self.DECAY_WINDOW)
+        self._n_trades    = 0    # closed trades seen — gates check_ai_exit warmup
+
+    def reset_trade_state(self):
+        """Clear all per-trade state (momentum velocity history + profit
+        history). Called on trade close and defensively on trade open."""
+        self._scorer.reset()
+        self._profit_hist.clear()
 
     def score(self, prices: deque) -> float:
         """Compute momentum score from recent option prices."""
@@ -183,6 +206,10 @@ class ExitBrain:
           - AND momentum score is low (no recovery expected)
           - AND we have enough profit worth protecting
         """
+        # Warmup: no learned-exit authority until enough trades have taught
+        # the trail engine. Hard SL / trail / timeout handle protection.
+        if self._n_trades < AI_EXIT_MIN_TRADES:
+            return False
         if profit_pct < self.DECAY_MIN_PROFIT:
             return False
         if momentum_score >= self.DECAY_MOMENTUM_CAP:
@@ -192,14 +219,19 @@ class ExitBrain:
         if len(hist) < self.DECAY_WINDOW:
             return False
 
-        # True only if EVERY tick in window shows declining profit
-        declining = all(hist[i] < hist[i - 1] for i in range(1, len(hist)))
+        # Non-increasing with a net decline — strict < on every tick would be
+        # silently disabled by a single tied print (prices are rounded to 2dp).
+        declining = (
+            all(hist[i] <= hist[i - 1] for i in range(1, len(hist)))
+            and hist[-1] < hist[0]
+        )
         return declining
 
     def on_trade_closed(self, result: dict):
         """Teach the engine from the closed trade."""
         self._engine.on_trade_closed(result)
-        self._profit_hist.clear()
+        self._n_trades += 1
+        self.reset_trade_state()
 
     @property
     def state(self) -> dict:

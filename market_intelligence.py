@@ -23,7 +23,24 @@ import os
 from datetime import datetime, date, timedelta
 from collections import deque
 
+from core.clock import now as _ist_now, today as _ist_today
+from config import NIFTY_EXPIRY_WEEKDAY
+
+
+# State dir anchored next to the module (or exe when frozen) so learned state
+# never silently lands in a different working directory. The replay harness
+# overrides STATE_DIR to isolate its runs from live state.
+import sys as _sys
+STATE_DIR = (os.path.dirname(os.path.abspath(_sys.executable))
+             if getattr(_sys, "frozen", False)
+             else os.path.dirname(os.path.abspath(__file__)))
 INTEL_STATE_FILE = "market_intel_state.json"
+
+def _state_path(mode: str = "") -> str:
+    if mode:
+        base, ext = os.path.splitext(INTEL_STATE_FILE)
+        return os.path.join(STATE_DIR, f"{base}_{mode}{ext}")
+    return os.path.join(STATE_DIR, INTEL_STATE_FILE)
 
 
 # ── Day Type Classification ──────────────────────────────────────────────────
@@ -43,7 +60,7 @@ def classify_day(expiry_date_str: str | None) -> dict:
       day_type, dte (days to expiry), theta_pressure (0-1),
       premium_decay_rate, recommended adjustments
     """
-    today = date.today()
+    today = _ist_today()
 
     if not expiry_date_str:
         return {
@@ -64,7 +81,8 @@ def classify_day(expiry_date_str: str | None) -> dict:
         }
 
     dte = (expiry - today).days
-    is_weekly = expiry.weekday() == 3  # Thursday = weekly NIFTY expiry
+    # NSE weekly NIFTY expiry weekday is configurable (moved Thu → Tue in 2025)
+    is_weekly = expiry.weekday() == NIFTY_EXPIRY_WEEKDAY
 
     # Classify
     if dte == 0:
@@ -214,94 +232,6 @@ class HistoricalAnalyzer:
             "avg_close_vs_open_pct": round(avg_co, 3),
             "historical_win_direction": win_dir,
         }
-
-    def analyze_intraday(self, minute_candles: list) -> dict:
-        """
-        Analyze today's intraday minute candles for pattern intelligence.
-
-        Returns:
-          session_range, range_pct, vwap_approx, volume_profile,
-          high_vol_hours, trend_phase
-        """
-        if not minute_candles or len(minute_candles) < 5:
-            return {
-                "session_range": 0, "range_pct": 0,
-                "session_high": 0, "session_low": 0,
-                "vwap_approx": 0, "volume_trend": "unknown",
-                "trend_phase": "unknown",
-                "candles_analyzed": 0,
-            }
-
-        highs = [c["h"] for c in minute_candles if c.get("h")]
-        lows = [c["l"] for c in minute_candles if c.get("l")]
-        closes = [c["c"] for c in minute_candles if c.get("c")]
-        volumes = [c.get("v", 0) for c in minute_candles]
-
-        if not highs or not lows or not closes:
-            return {
-                "session_range": 0, "range_pct": 0,
-                "session_high": 0, "session_low": 0,
-                "vwap_approx": 0, "volume_trend": "unknown",
-                "trend_phase": "unknown", "candles_analyzed": 0,
-            }
-
-        session_high = max(highs)
-        session_low = min(lows)
-        session_range = session_high - session_low
-        last_price = closes[-1]
-        range_pct = (session_range / last_price * 100) if last_price else 0
-
-        # VWAP approximation
-        if any(v > 0 for v in volumes):
-            typical_prices = [(minute_candles[i]["h"] + minute_candles[i]["l"] +
-                               minute_candles[i]["c"]) / 3
-                              for i in range(len(minute_candles))]
-            cum_tp_vol = sum(tp * v for tp, v in zip(typical_prices, volumes) if v > 0)
-            cum_vol = sum(v for v in volumes if v > 0)
-            vwap = cum_tp_vol / cum_vol if cum_vol > 0 else last_price
-        else:
-            vwap = sum(closes) / len(closes)  # simple average as fallback
-
-        # Volume trend: is volume increasing or decreasing through the day?
-        if len(volumes) >= 10:
-            first_half = volumes[:len(volumes)//2]
-            second_half = volumes[len(volumes)//2:]
-            avg_first = sum(first_half) / len(first_half) if first_half else 0
-            avg_second = sum(second_half) / len(second_half) if second_half else 0
-            if avg_second > avg_first * 1.3:
-                vol_trend = "increasing"
-            elif avg_second < avg_first * 0.7:
-                vol_trend = "decreasing"
-            else:
-                vol_trend = "steady"
-        else:
-            vol_trend = "unknown"
-
-        # Trend phase from price action
-        if len(closes) >= 10:
-            early = sum(closes[:5]) / 5
-            recent = sum(closes[-5:]) / 5
-            change_pct = (recent - early) / early * 100 if early else 0
-            if change_pct > 0.15:
-                trend_phase = "uptrend"
-            elif change_pct < -0.15:
-                trend_phase = "downtrend"
-            else:
-                trend_phase = "sideways"
-        else:
-            trend_phase = "unknown"
-
-        return {
-            "session_range":    round(session_range, 2),
-            "range_pct":        round(range_pct, 3),
-            "session_high":     round(session_high, 2),
-            "session_low":      round(session_low, 2),
-            "vwap_approx":      round(vwap, 2),
-            "volume_trend":     vol_trend,
-            "trend_phase":      trend_phase,
-            "candles_analyzed":  len(minute_candles),
-        }
-
 
 # ── Parameter Recommendations ────────────────────────────────────────────────
 
@@ -526,7 +456,7 @@ def compute_trade_budget(
         reasons.append(f"STREAK({loss_streak}): moderate reduction")
 
     # ── Time remaining adjustment ────────────────────────────────────
-    now = datetime.now()
+    now = _ist_now()
     mins_left = max(0, 15 * 60 + 20 - (now.hour * 60 + now.minute))
     if mins_left < 30:
         base = min(base, trades_today + 1)  # last 30 min: no new trades
@@ -548,6 +478,13 @@ def compute_trade_budget(
 
     # Floor and ceiling
     base = max(max(trades_today, 1), min(base, 25))
+
+    # Hard operator cap (RC max_trades_day) — the adaptive budget may only
+    # shrink below it, never exceed it.
+    hard_cap = int(session_stats.get("max_trades_cap") or 0)
+    if hard_cap > 0:
+        base = min(base, hard_cap)
+
     remaining = max(0, base - trades_today)
 
     # Confidence label
@@ -581,19 +518,19 @@ class MarketIntelligence:
       # At startup or when ATM resolves:
       mi.update_expiry("2025-06-26")
       mi.update_historical_candles(daily_candles)
-      mi.update_intraday_candles(minute_candles)
 
       # Before each entry:
       context = mi.get_context()
       # context has: day_info, hist_intel, intraday_intel, recommendations
     """
 
-    def __init__(self):
+    def __init__(self, mode: str | None = None):
+        from config import TRADING_MODE
+        self._mode = mode or TRADING_MODE
         self._expiry_str: str | None = None
         self._day_info: dict = {}
         self._hist_analyzer = HistoricalAnalyzer()
         self._hist_intel: dict = {}
-        self._intraday_intel: dict = {}
         self._recommendations: dict = {}
         self._daily_candles: list = []
         self._intraday_candles: list = []
@@ -612,15 +549,9 @@ class MarketIntelligence:
         self._hist_intel = self._hist_analyzer.analyze_candles(candles)
         self._rebuild_recommendations()
 
-    def update_intraday_candles(self, candles: list):
-        """Call with today's minute candles."""
-        self._intraday_candles = candles
-        self._intraday_intel = self._hist_analyzer.analyze_intraday(candles)
-        self._rebuild_recommendations()
-
     def _rebuild_recommendations(self):
         self._recommendations = recommend_params(
-            self._day_info, self._hist_intel, self._intraday_intel
+            self._day_info, self._hist_intel, {}
         )
 
     def get_context(self, session_stats: dict | None = None) -> dict:
@@ -631,19 +562,30 @@ class MarketIntelligence:
         ctx = {
             "day_info":        self._day_info,
             "hist_intel":      self._hist_intel,
-            "intraday_intel":  self._intraday_intel,
+            "intraday_intel":  {},
             "recommendations": self._recommendations,
             "expiry":          self._expiry_str,
         }
         if session_stats is not None:
             ctx["trade_budget"] = compute_trade_budget(
-                self._day_info, self._hist_intel, self._intraday_intel,
+                self._day_info, self._hist_intel, {},
                 session_stats, self._trade_history,
             )
         return ctx
 
+    def set_mode(self, mode: str):
+        """Switch demo/real state files (demo fills never train real stats)."""
+        if mode == self._mode:
+            return
+        self._save()
+        self._mode = mode
+        self._trade_history = []
+        self._load()
+
     def on_trade_closed(self, result: dict):
         """Learn from trade outcome for this day type."""
+        if result.get("mode") and result["mode"] != self._mode:
+            return
         pnl_pct = result.get("pnl_pct", 0) or 0
         day_type = self._day_info.get("day_type", DayType.NORMAL)
         self._trade_history.append({
@@ -673,23 +615,23 @@ class MarketIntelligence:
             "day_info":        self._day_info,
             "recommendations": self._recommendations,
             "hist_intel":      self._hist_intel,
-            "intraday_intel":  self._intraday_intel,
+            "intraday_intel":  {},
             "performance_by_day_type": by_type,
             "total_learned_trades": len(self._trade_history),
         }
 
     def _save(self):
         try:
-            with open(INTEL_STATE_FILE, "w") as f:
+            with open(_state_path(self._mode), "w") as f:
                 json.dump({"trade_history": self._trade_history}, f)
         except Exception:
             pass
 
     def _load(self):
-        if not os.path.exists(INTEL_STATE_FILE):
+        if not os.path.exists(_state_path(self._mode)):
             return
         try:
-            with open(INTEL_STATE_FILE) as f:
+            with open(_state_path(self._mode)) as f:
                 data = json.load(f)
             self._trade_history = data.get("trade_history", [])
         except Exception:

@@ -31,7 +31,21 @@ from collections import deque
 from datetime import datetime
 
 # ── Persistence ──────────────────────────────────────────────────────────────
+
+# State dir anchored next to the module (or exe when frozen) so learned state
+# never silently lands in a different working directory. The replay harness
+# overrides STATE_DIR to isolate its runs from live state.
+import sys as _sys
+STATE_DIR = (os.path.dirname(os.path.abspath(_sys.executable))
+             if getattr(_sys, "frozen", False)
+             else os.path.dirname(os.path.abspath(__file__)))
 ANALYZER_STATE_FILE = "entry_analyzer_state.json"
+
+def _state_path(mode: str = "") -> str:
+    if mode:
+        base, ext = os.path.splitext(ANALYZER_STATE_FILE)
+        return os.path.join(STATE_DIR, f"{base}_{mode}{ext}")
+    return os.path.join(STATE_DIR, ANALYZER_STATE_FILE)
 
 
 # ── Greeks estimation ────────────────────────────────────────────────────────
@@ -376,11 +390,20 @@ class DimensionWeights:
         "timing", "microstructure", "ai_brain", "capital",
         "vix", "option_chain", "multi_tf"
     ]
+    # Dimensions excluded from the composite and from learning:
+    #   option_chain — OptionChainAnalyzer is never fed quotes; its score was
+    #                  a constant 0.5 that only diluted the composite.
+    #   greeks       — synthetic estimates (no IV, no chain data: hardcoded
+    #                  gaussian gamma, price-ratio theta). Display-only until
+    #                  real chain data exists.
+    NEUTRALIZED = {"option_chain", "greeks"}
     LEARNING_RATE = 0.08
 
     def __init__(self):
         n = len(self.DIMENSIONS)
         self.weights = {d: 1.0 / n for d in self.DIMENSIONS}
+        for d in self.NEUTRALIZED:
+            self.weights[d] = 0.0
         self.n_trades = 0
         self.n_wins = 0
         self._last_scores: dict | None = None
@@ -390,6 +413,8 @@ class DimensionWeights:
         total = 0
         w_sum = 0
         for d in self.DIMENSIONS:
+            if d in self.NEUTRALIZED:
+                continue
             w = self.weights.get(d, 0.125)
             s = dim_scores.get(d, 0.5)
             total += w * s
@@ -407,14 +432,16 @@ class DimensionWeights:
 
         lr = self.LEARNING_RATE
         for d in self.DIMENSIONS:
+            if d in self.NEUTRALIZED:
+                continue
             s = dim_scores.get(d, 0.5)
-            if won:
-                # High score + win → good predictor → boost weight
-                self.weights[d] += lr * s * 0.1
-            else:
-                # High score + loss → bad predictor → reduce weight
-                self.weights[d] -= lr * s * 0.05
-
+            # Symmetric, DISCRIMINATIVE update: only dimensions that deviated
+            # from neutral (0.5) move, in proportion to how confidently they
+            # spoke and whether they were right. The old rule boosted any
+            # dimension that merely tended to score high (e.g. timing ≈ 0.9
+            # in prime hours) regardless of predictive value, with asymmetric
+            # magnitudes (wins ×0.1 vs losses ×0.05).
+            self.weights[d] += lr * (s - 0.5) * (1.0 if won else -1.0)
             self.weights[d] = max(0.02, min(0.5, self.weights[d]))
 
         # Normalize to sum = 1
@@ -442,6 +469,9 @@ class DimensionWeights:
         for dim in self.DIMENSIONS:
             if dim not in self.weights:
                 self.weights[dim] = 0.125
+        # Neutralized dimensions stay at 0 regardless of persisted state
+        for dim in self.NEUTRALIZED:
+            self.weights[dim] = 0.0
 
 
 # ── Entry Verdict ────────────────────────────────────────────────────────────
@@ -493,12 +523,24 @@ class EntryAnalyzer:
       analyzer.on_trade_closed(result_dict)
     """
 
-    MIN_SCORE_ENTRY = 45    # below this → block
+    MIN_SCORE_ENTRY   = 45  # legacy threshold (kept for reference/UI)
+    WARMUP_MIN_SCORE  = 40  # first 20 trades: block only grade-F setups
     MIN_SCORE_TRAINED = 52  # after 20 trades, require higher score
 
-    def __init__(self):
+    def __init__(self, mode: str | None = None):
+        from config import TRADING_MODE
+        self._mode = mode or TRADING_MODE
         self._weights = DimensionWeights()
         self._last_dim_scores: dict | None = None
+        self._load()
+
+    def set_mode(self, mode: str):
+        """Switch demo/real state files (demo fills never train real weights)."""
+        if mode == self._mode:
+            return
+        self._save()
+        self._mode = mode
+        self._weights = DimensionWeights()
         self._load()
 
     def analyze(self, state: dict) -> EntryVerdict:
@@ -649,7 +691,12 @@ class EntryAnalyzer:
             v.grade = "F"
 
         # ── Decision ───────────────────────────────────────────────────
-        threshold = self.MIN_SCORE_TRAINED if self._weights.n_trades >= 20 else self.MIN_SCORE_ENTRY
+        # Warmup: with < 20 trades the weights are untrained — only reject
+        # outright junk (grade F). The full threshold applies once trained.
+        if self._weights.n_trades < 20:
+            threshold = self.WARMUP_MIN_SCORE
+        else:
+            threshold = self.MIN_SCORE_TRAINED
 
         if composite >= threshold:
             v.allow = True
@@ -702,6 +749,9 @@ class EntryAnalyzer:
         """
         if self._last_dim_scores is None:
             return
+        if result.get("mode") and result["mode"] != self._mode:
+            self._last_dim_scores = None
+            return
 
         pnl_pct = result.get("pnl_pct", 0) or 0
         won = pnl_pct >= 0.5  # 0.5% = win (covers transaction costs)
@@ -723,16 +773,16 @@ class EntryAnalyzer:
 
     def _save(self):
         try:
-            with open(ANALYZER_STATE_FILE, "w") as f:
+            with open(_state_path(self._mode), "w") as f:
                 json.dump(self._weights.to_dict(), f, indent=2)
         except Exception as e:
             print(f"[EntryAnalyzer] save error: {e}")
 
     def _load(self):
-        if not os.path.exists(ANALYZER_STATE_FILE):
+        if not os.path.exists(_state_path(self._mode)):
             return
         try:
-            with open(ANALYZER_STATE_FILE) as f:
+            with open(_state_path(self._mode)) as f:
                 data = json.load(f)
             self._weights.from_dict(data)
             print(

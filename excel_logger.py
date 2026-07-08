@@ -14,11 +14,18 @@ Usage:
 """
 
 import os
+import sys
 import threading
 from datetime import datetime
 
 _xl_lock = threading.Lock()
-EXCEL_LOG = "trade_log.xlsx"
+
+# Anchored next to the module (or exe when frozen) — a bare relative path
+# silently wrote to whatever cwd the process happened to have.
+_BASE_DIR = (os.path.dirname(os.path.abspath(sys.executable))
+             if getattr(sys, "frozen", False)
+             else os.path.dirname(os.path.abspath(__file__)))
+EXCEL_LOG = os.path.join(_BASE_DIR, "trade_log.xlsx")
 
 COLUMNS = [
     "Date",
