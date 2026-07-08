@@ -3303,17 +3303,29 @@ def api_trade_history():
 
 @app.route("/api/nifty_historical")
 def api_nifty_historical():
-    """Fetch NIFTY 50 historical candles from Zerodha for chart."""
+    """Fetch NIFTY 50 historical candles from Zerodha for the chart.
+
+    Optional `from` / `to` (YYYY-MM-DD) select a date range — the dashboard
+    uses this to lazy-load older history as the user scrolls left.
+    Defaults to today's session only.
+    """
     import urllib.parse as _up
     interval = request.args.get("interval", "minute")
     cfg      = ZERODHA_CONFIG
     enctoken = _up.unquote(cfg.get("enctoken", ""))
     user_id  = cfg.get("user_id", "")
     today    = _cnow().strftime("%Y-%m-%d")
+
+    _date_re = _re.compile(r"^\d{4}-\d{2}-\d{2}$")
+    from_d = request.args.get("from", today)
+    to_d   = request.args.get("to", today)
+    if not _date_re.match(from_d) or not _date_re.match(to_d):
+        return jsonify({"error": "bad date format (YYYY-MM-DD)"}), 400
+
     token    = S.get("index_token", NIFTY_TOKEN)
     url = (
         f"/oms/instruments/historical/{token}/{interval}"
-        f"?user_id={user_id}&oi=0&from={today}&to={today}"
+        f"?user_id={user_id}&oi=0&from={from_d}&to={to_d}"
     )
     req = _urllib_request.Request(
         f"https://kite.zerodha.com{url}",

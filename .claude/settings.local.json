@@ -49,7 +49,12 @@
       "Read(//c/Program Files/Google/Chrome/Application/**)",
       "Bash(npm i *)",
       "Bash(curl -s -o /dev/null -w \"server: %{http_code}\\\\n\" http://localhost:5001/)",
-      "Bash(git rm *)"
+      "Bash(git rm *)",
+      "Bash(curl -s \"http://localhost:5001/api/nifty_historical?interval=minute&from=2026-07-06&to=2026-07-07\")",
+      "Bash(curl -s \"http://localhost:5001/api/nifty_historical?interval=minute&from=2026-07-01&to=2026-07-01\")",
+      "Bash(curl -s \"http://localhost:5001/api/nifty_historical\")",
+      "Bash(curl *)",
+      "Bash(git commit -q -m ' *)"
     ]
   }
 }

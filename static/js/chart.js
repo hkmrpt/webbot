@@ -28,6 +28,21 @@ function tfToInterval(tf) {
   return '60minute';
 }
 
+// Days fetched per back-fill request when scrolling into the past
+function chunkDays(tf) {
+  if (tf <= 60)   return 3;
+  if (tf <= 300)  return 10;
+  if (tf <= 900)  return 30;
+  if (tf <= 1800) return 45;
+  return 90;
+}
+
+const HIST_MAX_DAYS_BACK = 120;   // hard stop for lazy back-loading
+
+function dstr(d) {
+  return d.toISOString().slice(0, 10);
+}
+
 const CHART_OPTS = {
   layout: { background: { color: '#070b14' }, textColor: '#4e6585',
             fontFamily: "'IBM Plex Mono', monospace", fontSize: 10 },
@@ -71,10 +86,21 @@ export class BotChart {
     this.overlays = new Map();   // catalogId -> {series:[...], params}
     this.oscillator = null;      // {id, series:[...], params}
 
+    // history paging (scroll-left back-fill)
+    this._histOldest   = null;    // YYYY-MM-DD of the earliest loaded day
+    this._histLoading  = false;
+    this._histDone     = false;
+    this._histEmptyRuns = 0;
+
     this.chart = LWC.createChart(mainEl, { ...CHART_OPTS, autoSize: true });
     this.osc   = LWC.createChart(oscEl,  { ...CHART_OPTS, autoSize: true });
     this._buildPriceSeries();
     this._syncTimeScales();
+
+    // Lazy back-fill: nearing the left edge of loaded data loads older days
+    this.chart.timeScale().subscribeVisibleLogicalRangeChange(r => {
+      if (r && r.from < 15) this._fetchOlder();
+    });
     this.onOhlc = null;          // callback({o,h,l,c}) for the readout
     this._lastCandles = [];
 
@@ -126,6 +152,10 @@ export class BotChart {
   // ── data ────────────────────────────────────────────────────────────────
   async loadHistorical() {
     if (this.source !== 'nifty') { this.render(); return; }
+    // reset paging state — a TF switch reloads at the new interval
+    this._histOldest = dstr(new Date());
+    this._histDone = false;
+    this._histEmptyRuns = 0;
     try {
       const r = await fetch('/api/nifty_historical?interval=' + tfToInterval(this.tf));
       const data = await r.json();
@@ -135,6 +165,50 @@ export class BotChart {
       }
     } catch (e) { /* no history (bad token / off-hours) — tick-only chart */ }
     this.render();
+  }
+
+  /** Scroll-left back-fill: fetch the chunk of days before the earliest
+   *  loaded day and prepend it, preserving the visible time range. */
+  async _fetchOlder() {
+    if (this.source !== 'nifty' || this._histLoading || this._histDone
+        || !this._histOldest) return;
+    this._histLoading = true;
+    try {
+      const to = new Date(this._histOldest + 'T00:00:00Z');
+      to.setUTCDate(to.getUTCDate() - 1);
+      const from = new Date(to);
+      from.setUTCDate(from.getUTCDate() - (chunkDays(this.tf) - 1));
+
+      const ageDays = (Date.now() - to.getTime()) / 86400000;
+      if (ageDays > HIST_MAX_DAYS_BACK) { this._histDone = true; return; }
+
+      const r = await fetch(`/api/nifty_historical?interval=${tfToInterval(this.tf)}`
+                            + `&from=${dstr(from)}&to=${dstr(to)}`);
+      const data = await r.json();
+      this._histOldest = dstr(from);
+
+      if (!Array.isArray(data) || !data.length) {
+        // holidays/weekends return empty — give up only after several dry chunks
+        if (++this._histEmptyRuns >= 4) this._histDone = true;
+        return;
+      }
+      this._histEmptyRuns = 0;
+
+      const hist = this.store.nifty.hist;
+      const firstT = hist.length ? hist[0].t : Infinity;
+      const older = data.map(c => (
+        { t: c.t + IST_OFF, o: c.o, h: c.h, l: c.l, c: c.c, v: c.v || 0 }))
+        .filter(c => c.t < firstT);
+      if (!older.length) return;
+      this.store.nifty.hist = older.concat(hist);
+
+      // Re-render without yanking the viewport: setData shifts logical
+      // indices, so save/restore the TIME range instead.
+      const view = this.chart.timeScale().getVisibleRange();
+      this.render();
+      if (view) this.chart.timeScale().setVisibleRange(view);
+    } catch (e) { /* transient fetch error — retry on next scroll event */ }
+    finally { this._histLoading = false; }
   }
 
   onTick(source, price, tsSec, cumVol = 0) {
