@@ -32,7 +32,19 @@
       "Bash(mv \"C:/Users/hkmrp/.claude/projects/C--Users-hkmrp-PycharmProjects-webbot/memory/project_multistock.md\" \"C:/Users/hkmrp/.claude/projects/C--Users-hkmrp-PycharmProjects-webbot/memory/project_current_state.md\")",
       "Bash(grep -n \"_no_new_high_count\\\\|else:$\" buy_exit_strategy.py)",
       "Bash(git add *)",
-      "Bash(git commit -m ' *)"
+      "Bash(git commit -m ' *)",
+      "Bash(mkdir -p static/vendor)",
+      "Bash(curl -sL -o static/vendor/lightweight-charts.standalone.production.js https://unpkg.com/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js)",
+      "Bash(curl -s -o /dev/null -w \"dashboard: %{http_code}\\\\n\" http://localhost:5001/)",
+      "Bash(curl -s -o /dev/null -w \"css: %{http_code}\\\\n\" http://localhost:5001/static/css/dashboard.css)",
+      "Bash(curl -s -o /dev/null -w \"app.js: %{http_code}\\\\n\" http://localhost:5001/static/js/app.js)",
+      "Bash(curl -s -o /dev/null -w \"chart.js: %{http_code}\\\\n\" http://localhost:5001/static/js/chart.js)",
+      "Bash(curl -s -o /dev/null -w \"indicators.js: %{http_code}\\\\n\" http://localhost:5001/static/js/indicators.js)",
+      "Bash(curl -s http://localhost:5001/api/analytics)",
+      "Bash(awk '{print $1}')",
+      "Bash(powershell -Command 'Get-Process python -ErrorAction SilentlyContinue | Where-Object {\\($_.CommandLine -like '\\\\''*buy_app*'\\\\''\\)} | Stop-Process -Force')",
+      "Bash(curl -s -m 2 -o /dev/null -w \"%{http_code}\" http://localhost:5001/)",
+      "PowerShell(Get-CimInstance *)"
     ]
   }
 }
