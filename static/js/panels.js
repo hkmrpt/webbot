@@ -125,31 +125,38 @@ export function updateManualLevels(d) {
   }
 }
 
-/* ── Pending order panel ───────────────────────────────────────────────── */
-export function updatePendingOrder(d) {
+/* ── Pending orders panel (list, OCO) ──────────────────────────────────── */
+let _poRendered = '';
+export function updatePendingOrders(d) {
   const manual = d.scalp_mode === 'manual';
   show('pendingBlock', manual);
   if (!manual) return;
-  const po = d.pending_order;
-  show('poForm', !po);
-  show('poArmed', !!po);
-  show('poBadge', !!po);
-  setClass('poBadge', 'armed-pulse', !!po);
-  if (po) {
-    const arrow = po.dir === 'up' ? '≥' : '≤';
-    const now = po.watch === 'nifty' ? d.nifty_price
-      : (po.side === 'PE' ? d.pe_price : d.ce_price);
-    setText('poStatus',
-      `BUY ${po.side} when ${po.watch.toUpperCase()} ${arrow} ${po.level}` +
-      (now ? `  ·  now ${Number(now).toFixed(1)}` : ''));
-  } else {
-    // placeholder shows the live value of the selected watch source
-    const watchSel = $('poWatch'), sideSel = $('poSide'), lvl = $('poLevel');
-    if (watchSel && lvl && document.activeElement !== lvl) {
-      const now = watchSel.value === 'nifty' ? d.nifty_price
-        : (sideSel.value === 'PE' ? d.pe_price : d.ce_price);
-      if (now) lvl.placeholder = Number(now).toFixed(1);
-    }
+  const orders = d.pending_orders || [];
+  show('poBadge', orders.length > 0);
+  setClass('poBadge', 'armed-pulse', orders.length > 0);
+  setText('poBadge', orders.length > 1 ? `${orders.length} ARMED` : 'ARMED');
+  show('poForm', orders.length < 4);
+  show('poCancelAll', orders.length > 1);
+
+  const key = orders.map(o => `${o.id}:${o.level}:${o.dir}`).join('|');
+  if (key !== _poRendered) {
+    _poRendered = key;
+    $('poList').innerHTML = orders.map(o => {
+      const arrow = o.dir === 'up' ? '≥' : '≤';
+      return `<div class="po-row">
+        <span class="po-side ${o.side.toLowerCase()}">${o.side}</span>
+        <span class="po-desc">${o.watch === 'nifty' ? 'NIFTY' : 'PREM'} ${arrow} ${o.level}</span>
+        <button class="po-x" data-id="${o.id}" title="cancel">✕</button>
+      </div>`;
+    }).join('');
+  }
+
+  // placeholder shows the live value of the selected watch source
+  const watchSel = $('poWatch'), sideSel = $('poSide'), lvl = $('poLevel');
+  if (watchSel && lvl && document.activeElement !== lvl) {
+    const now = watchSel.value === 'nifty' ? d.nifty_price
+      : (sideSel.value === 'PE' ? d.pe_price : d.ce_price);
+    if (now) lvl.placeholder = Number(now).toFixed(1);
   }
 }
 

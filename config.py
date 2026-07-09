@@ -295,3 +295,8 @@ SCALP_MICRO_WINDOW        = 8     # ticks to evaluate micro-momentum
 MANUAL_NIFTY_SL_PTS        = 15.0  # default SL distance (NIFTY points)
 MANUAL_NIFTY_TP_PTS        = 30.0  # default target distance (NIFTY points)
 MANUAL_MAX_PREMIUM_LOSS_PCT = 50.0 # safety net: premium down this % → exit anyway
+
+# Pending (conditional) orders — several may be armed at once (e.g. a
+# breakout trigger above AND a breakdown trigger below). OCO: the first one
+# to go live cancels the rest. Each order fires exactly once.
+MAX_PENDING_ORDERS         = 4

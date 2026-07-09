@@ -98,7 +98,7 @@ from config import (
     SCALP_JUMP_MULTIPLIER, SCALP_BREAKEVEN_PCT, SCALP_PROFIT_TRAIL_THRESHOLD,
     SCALP_MICRO_MOVE_PCT, SCALP_MICRO_CONSISTENCY, SCALP_MICRO_WINDOW,
     SCALP_TARGET_PCT,
-    MANUAL_NIFTY_SL_PTS, MANUAL_NIFTY_TP_PTS,
+    MANUAL_NIFTY_SL_PTS, MANUAL_NIFTY_TP_PTS, MAX_PENDING_ORDERS,
 )
 from buy_exit_strategy import BuyExitStrategy
 from market_brain import MarketBrain
@@ -877,7 +877,7 @@ def _build_state_payload():
         "scalp_mode":            S["scalp_mode"],
         "scalp_tp":              round(snap["entry"] * (1 + SCALP_TARGET_PCT / 100), 2) if snap.get("entry") and S["scalp_mode"] != "off" else None,
         "manual_levels":         S.get("manual_levels"),
-        "pending_order":         S.get("pending_order"),
+        "pending_orders":        S.get("pending_orders") or [],
 
         "nifty_atm":            S.get("nifty_atm"),
         "atm_pending":          S.get("atm_pending", False),
@@ -1045,12 +1045,13 @@ def _run_order_intent(intent, opened_payload=None, closed_payload=None):
 
 
 # ── Tick processor ────────────────────────────────────────────────────────────
-def process_ticks(ticks):
+def process_ticks(ticks, mark_ws=True):
     trading_active = S["running"] or S["trade_open"]
 
     if not trading_active:
         # Robot stopped — still update prices for live dashboard display
         _need_atm = False
+        idle_logs = []
         for tick in ticks:
             token = tick.get("instrument_token")
             price = tick.get("last_price")
@@ -1061,7 +1062,13 @@ def process_ticks(ticks):
             with _state_lock:
                 if token == NIFTY_TOKEN or token == S.get("index_token"):
                     _ingest_index_tick(price, full=False)
-                    S["last_ws_tick_ts"] = _time.time()
+                    if mark_ws:
+                        S["last_ws_tick_ts"] = _time.time()
+                    # Pending orders can't execute while stopped — a crossing
+                    # cancels loudly instead of being silently missed
+                    pend = _check_pending_triggers_locked("nifty", price)
+                    if pend:
+                        idle_logs.extend(pend.get("logs", []))
                     # Auto-resolve ATM if not yet resolved
                     if not S.get("nifty_atm") and not S.get("_idle_atm_pending"):
                         S["_idle_atm_pending"] = True
@@ -1071,6 +1078,11 @@ def process_ticks(ticks):
                     sl = S["slots"][side]
                     if token == sl["token"]:
                         sl["price"] = price
+                        pend = _check_pending_triggers_locked("premium", price, side=side)
+                        if pend:
+                            idle_logs.extend(pend.get("logs", []))
+        for msg, level in idle_logs:
+            log(msg, level)
         if _need_atm:
             def _idle_resolve(p=_need_atm):
                 atm = _resolve_nifty_atm(p)
@@ -1102,7 +1114,8 @@ def process_ticks(ticks):
         with _state_lock:
             if token == NIFTY_TOKEN or token == S["index_token"]:
                 _ingest_index_tick(price)
-                S["last_ws_tick_ts"] = _time.time()
+                if mark_ws:
+                    S["last_ws_tick_ts"] = _time.time()
 
                 # ── Auto-resolve ATM on first tick ────────────────────────────
                 # _atm_resolving is the single in-flight guard for BOTH the
@@ -1179,9 +1192,9 @@ def process_ticks(ticks):
                         order_intent         = result.get("order_intent")
                         log_entries.extend(result.get("logs", []))
 
-                # ── Pending order: NIFTY-level trigger ────────────────────
+                # ── Pending orders: NIFTY-level triggers ──────────────────
                 if not trade_opened_payload:
-                    pend = _check_pending_trigger_locked("nifty", price)
+                    pend = _check_pending_triggers_locked("nifty", price)
                     if pend:
                         trade_opened_payload = pend.get("trade_opened_payload")
                         order_intent         = pend.get("order_intent") or order_intent
@@ -1209,9 +1222,9 @@ def process_ticks(ticks):
                     if S["trade_side"] == side:
                         S["option_atr"] = _compute_option_atr(list(sl["price_history"]))
 
-                    # ── Pending order: premium-level trigger ─────────────
+                    # ── Pending orders: premium-level triggers ────────────
                     if not trade_opened_payload:
-                        pend = _check_pending_trigger_locked("premium", price, side=side)
+                        pend = _check_pending_triggers_locked("premium", price, side=side)
                         if pend:
                             trade_opened_payload = pend.get("trade_opened_payload")
                             order_intent         = pend.get("order_intent") or order_intent
@@ -2645,7 +2658,7 @@ def _reset_session_state(idx_token, idx_name):
             "last_ws_tick_ts":    0,
             "scalp_mode":         "off",  # never inherit a stale scalp mode
             "manual_levels":      None,
-            "pending_order":      None,
+            "pending_orders":     [],
             "_slope_ind":         RollingSlope(buf),
             "_atr_ind":           RollingATR(RC["jump_atr_window"] + 1),
     })
@@ -2881,7 +2894,7 @@ def on_stop():
         S["trade_open"]    = False
         S["active_sides"]  = set()
         S["trade_side"]    = None
-        S["pending_order"] = None   # stop cancels any armed conditional order
+        S["pending_orders"] = []    # stop cancels all armed conditional orders
         S["slots"]        = {"CE": _make_opt_slot(), "PE": _make_opt_slot()}
         _reset_pending()
 
@@ -3180,6 +3193,7 @@ def on_place_pending_order(data):
     watch = str(data.get("watch", "nifty")).lower()
     err = None
     with _state_lock:
+        orders = S.setdefault("pending_orders", [])
         if side not in ("CE", "PE"):
             err = f"Invalid side: {side}"
         elif watch not in ("nifty", "premium"):
@@ -3188,8 +3202,8 @@ def on_place_pending_order(data):
             err = "Pending orders need Scalp MANUAL mode"
         elif S["trade_open"]:
             err = "Trade already open"
-        elif S.get("pending_order"):
-            err = "A pending order is already armed — cancel it first"
+        elif len(orders) >= MAX_PENDING_ORDERS:
+            err = f"Max {MAX_PENDING_ORDERS} pending orders — cancel one first"
         else:
             try:
                 level = round(float(data.get("level")), 2)
@@ -3204,29 +3218,32 @@ def on_place_pending_order(data):
             elif abs(level - cur) < 1e-9:
                 err = "Level equals the current value — pick a different level"
             else:
+                S["_po_seq"] = S.get("_po_seq", 0) + 1
                 po = {
+                    "id": S["_po_seq"],
                     "side": side, "watch": watch, "level": level,
                     "dir": "up" if level > cur else "down",
                     "armed_at": round(cur, 2),
                 }
-                S["pending_order"] = po
+                orders.append(po)
     if err:
         emit("error", {"msg": err})
         return
     arrow = "≥" if po["dir"] == "up" else "≤"
-    log(f"⏳ PENDING armed — BUY {side} when {watch.upper()} {arrow} {po['level']}"
-        f"  (now {po['armed_at']})", "warning")
+    log(f"⏳ PENDING #{po['id']} armed — BUY {side} when {watch.upper()} {arrow} "
+        f"{po['level']}  (now {po['armed_at']})", "warning")
     broadcast()
 
 
 @socketio.on("update_pending_order")
 def on_update_pending_order(data):
-    """Move the trigger level of the armed pending order (drag on chart)."""
+    """Move the trigger level of an armed pending order (drag on chart)."""
     err = None
     with _state_lock:
-        po = S.get("pending_order")
+        orders = S.get("pending_orders") or []
+        po = next((o for o in orders if o["id"] == data.get("id")), None)
         if not po:
-            err = "No pending order armed"
+            err = "Pending order not found"
         else:
             try:
                 level = round(float(data.get("level")), 2)
@@ -3239,45 +3256,76 @@ def on_update_pending_order(data):
     if err:
         emit("error", {"msg": err})
         return
-    log(f"⏳ Pending level moved → {data.get('level')}", "info")
+    log(f"⏳ Pending #{data.get('id')} level moved → {data.get('level')}", "info")
     broadcast()
 
 
 @socketio.on("cancel_pending_order")
 def on_cancel_pending_order(data=None):
+    """Cancel one pending order by id, or all when no id is given."""
+    oid = (data or {}).get("id")
     with _state_lock:
-        had = S.get("pending_order")
-        S["pending_order"] = None
+        orders = S.get("pending_orders") or []
+        if oid is None:
+            had = len(orders)
+            S["pending_orders"] = []
+        else:
+            had = len([o for o in orders if o["id"] == oid])
+            S["pending_orders"] = [o for o in orders if o["id"] != oid]
     if had:
-        log("⏳ Pending order cancelled", "info")
+        log(f"⏳ Pending order{'s' if oid is None and had > 1 else ''} cancelled"
+            + (f" (#{oid})" if oid is not None else ""), "info")
     broadcast()
 
 
-def _check_pending_trigger_locked(watch_kind, value, side=None):
+def _check_pending_triggers_locked(watch_kind, value, side=None):
     """
-    Called under _state_lock on every relevant tick.
-    Returns the entry bundle when the pending order fires, else None.
-    A trigger that fails its gates cancels the pending order (logged).
+    Called under _state_lock on every relevant tick (WS, idle, poller).
+    Scans the armed pending orders; the first one whose level is crossed
+    fires. Semantics:
+      • one-shot — a crossed order is always consumed
+      • OCO      — when an order goes LIVE, all remaining orders cancel
+      • blocked  — a trigger that fails its gates cancels only itself
+      • stopped  — crossing while the robot isn't running cancels loudly
+    Returns an entry bundle ({trade_opened_payload, order_intent, logs}) or
+    a logs-only bundle, or None.
     """
-    po = S.get("pending_order")
-    if not po or po["watch"] != watch_kind or value is None:
-        return None
-    # premium triggers only react to the pending side's own option ticks
-    if watch_kind == "premium" and side is not None and po["side"] != side:
+    orders = S.get("pending_orders") or []
+    if not orders or value is None:
         return None
     if S["trade_open"]:
-        S["pending_order"] = None
-        return None
-    crossed = (value >= po["level"]) if po["dir"] == "up" else (value <= po["level"])
-    if not crossed:
-        return None
+        S["pending_orders"] = []
+        return {"logs": [("⏳ Pending orders cleared — a trade is already live", "info")]}
 
-    S["pending_order"] = None          # one-shot — consumed on trigger
-    err, bundle = _manual_entry_locked(po["side"], tag="⏳→⚡ PENDING TRIGGERED — BUY")
-    if err:
-        bundle = {"logs": [(f"⏳ Pending {po['side']} triggered @{value} but blocked: {err} "
-                            f"— order cancelled", "error")]}
-    return bundle
+    for po in list(orders):
+        if po["watch"] != watch_kind:
+            continue
+        # premium triggers only react to the pending side's own option ticks
+        if watch_kind == "premium" and side is not None and po["side"] != side:
+            continue
+        crossed = (value >= po["level"]) if po["dir"] == "up" else (value <= po["level"])
+        if not crossed:
+            continue
+
+        orders.remove(po)              # one-shot — consumed on trigger
+
+        if not S["running"]:
+            return {"logs": [(f"⏳ Pending #{po['id']} {po['side']} @{po['level']} crossed "
+                              f"but robot NOT RUNNING — order cancelled", "error")]}
+
+        err, bundle = _manual_entry_locked(po["side"], tag="⏳→⚡ PENDING TRIGGERED — BUY")
+        if err:
+            return {"logs": [(f"⏳ Pending #{po['id']} {po['side']} triggered @{value} "
+                              f"but blocked: {err} — order cancelled", "error")]}
+
+        # OCO: one order is live → close the remaining ones automatically
+        if S["pending_orders"]:
+            n = len(S["pending_orders"])
+            S["pending_orders"] = []
+            bundle.setdefault("logs", []).append(
+                (f"⏳ OCO — {n} remaining pending order(s) cancelled", "info"))
+        return bundle
+    return None
 
 
 @socketio.on("set_manual_levels")
@@ -3792,26 +3840,29 @@ def _nifty_ltp_poller():
     ATR / regression / momentum (data contamination), even while stopped.
 
     Now: if the WS delivered an index tick within the last 10 s, the poller
-    does nothing. Only when the WS is silent does it run the full ingestion
-    pipeline to keep indicators alive.
+    does nothing. Only when the WS is silent does it feed the price through
+    the FULL tick pipeline (process_ticks with mark_ws=False) — so manual
+    NIFTY-level exits, pending-order triggers and spike detection keep
+    working on REST data during a WS outage instead of being silently
+    skipped.
     """
     import time as _t
     WS_STALE_SECS = 10
     while True:
         _t.sleep(2)
         try:
-            with _state_lock:
-                ws_fresh = (_time.time() - S.get("last_ws_tick_ts", 0)) < WS_STALE_SECS
+            ws_fresh = (_time.time() - S.get("last_ws_tick_ts", 0)) < WS_STALE_SECS
             if ws_fresh:
                 continue
             price = _fetch_nifty_ltp()
             if price is None:
                 continue
-            with _state_lock:
-                # Re-check under lock — a WS tick may have arrived meanwhile
-                if (_time.time() - S.get("last_ws_tick_ts", 0)) < WS_STALE_SECS:
-                    continue
-                _ingest_index_tick(price, full=S["running"] or S["trade_open"])
+            # Re-check — a WS tick may have arrived during the fetch
+            if (_time.time() - S.get("last_ws_tick_ts", 0)) < WS_STALE_SECS:
+                continue
+            # mark_ws=False: poller data must not mask real WS staleness
+            process_ticks([{"instrument_token": S.get("index_token", NIFTY_TOKEN),
+                            "last_price": price}], mark_ws=False)
         except Exception as exc:
             app.logger.warning(f"NIFTY LTP poller error: {exc}")
 

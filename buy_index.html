@@ -79,7 +79,8 @@
         <button class="big-btn buy-pe" id="btnScalpPE">BUY PE</button>
       </div>
       <div class="pending-order hidden" id="pendingBlock">
-        <div class="ml-title po-title">PENDING ORDER <span class="badge hidden" id="poBadge">ARMED</span></div>
+        <div class="ml-title po-title">PENDING ORDERS <span class="badge hidden" id="poBadge">ARMED</span></div>
+        <div id="poList"></div>
         <div id="poForm">
           <div class="ml-row">
             <select id="poSide" class="sel"><option value="CE">CE</option><option value="PE">PE</option></select>
@@ -87,12 +88,9 @@
             <input type="number" step="0.1" id="poLevel" placeholder="level">
           </div>
           <button class="mini-btn wide" id="poArm">⏳ ARM PENDING BUY</button>
-          <div class="hint">Fires when the watched value crosses your level — above = breakout, below = dip</div>
+          <div class="hint">Fires once when crossed · first fill cancels the rest (OCO) · max 4</div>
         </div>
-        <div class="hidden" id="poArmed">
-          <div class="hint" id="poStatus"></div>
-          <button class="mini-btn wide" id="poCancel">✕ CANCEL PENDING</button>
-        </div>
+        <button class="mini-btn wide hidden" id="poCancelAll">✕ CANCEL ALL</button>
       </div>
       <div class="manual-levels hidden" id="manualLevels">
         <div class="ml-title">NIFTY EXIT LEVELS <span id="mlSide" class="badge"></span></div>

@@ -66,9 +66,9 @@ const LEVEL_STYLE = {
   // Manual-trade NIFTY levels — drawn on the NIFTY chart
   msl:   { color: '#ff3d5c', title: 'N-SL'  },
   mtp:   { color: '#00e87a', title: 'N-TP'  },
-  // Pending-order trigger — drawn on whichever chart it watches
-  pnd:   { color: '#4d8eff', title: 'PND'   },
 };
+
+const PND_COLOR = '#4d8eff';
 
 export class BotChart {
 
@@ -86,8 +86,9 @@ export class BotChart {
       option: { hist: [], ticks: [] },
     };
     this.markers  = [];
-    this.levels   = { ref: 0, entry: 0, sl: 0, trail: 0, tp: 0, msl: 0, mtp: 0, pnd: 0 };
-    this.pendingWatch = null;    // 'nifty' | 'premium' — where the PND line lives
+    this.levels   = { ref: 0, entry: 0, sl: 0, trail: 0, tp: 0, msl: 0, mtp: 0 };
+    this._pendingDefs  = [];     // [{id, side, watch, level, dir}]
+    this._pendingLines = {};     // id -> priceLine (on the current chart)
     this._priceLines = {};
     this.overlays = new Map();   // catalogId -> {series:[...], params}
     this.oscillator = null;      // {id, series:[...], params}
@@ -135,6 +136,7 @@ export class BotChart {
   _buildPriceSeries() {
     if (this._series) this.chart.removeSeries(this._series);
     this._priceLines = {};
+    this._pendingLines = {};   // lines died with the old series
     if (this.type === 'line') {
       this._series = this.chart.addLineSeries({ color: '#00d4ff', lineWidth: 2,
         priceLineVisible: false });
@@ -318,11 +320,40 @@ export class BotChart {
       // Never let a state broadcast yank a line the user is dragging
       // (or just dropped — the server echo takes a moment to round-trip)
       if (this._dragKey === k
-          || (holding && (k === 'msl' || k === 'mtp' || k === 'pnd'))) continue;
+          || (holding && (k === 'msl' || k === 'mtp'))) continue;
       const v = levels[k] || 0;
       if (this.levels[k] !== v) { this.levels[k] = v; changed = true; }
     }
     if (changed) this._applyLevels();
+  }
+
+  /** Sync the pending-order trigger lines. defs: [{id, side, watch, level, dir}] */
+  setPendingOrders(defs) {
+    const dragging = this._dragKey && this._dragKey.startsWith('pnd:');
+    if (dragging || Date.now() < this._dragHold) return;
+    const next = (defs || []).map(d => ({ ...d }));
+    const same = next.length === this._pendingDefs.length
+      && next.every((d, i) => d.id === this._pendingDefs[i].id
+                           && d.level === this._pendingDefs[i].level
+                           && d.watch === this._pendingDefs[i].watch);
+    if (same) return;
+    this._pendingDefs = next;
+    this._applyPendingLines();
+  }
+
+  _applyPendingLines() {
+    for (const [id, line] of Object.entries(this._pendingLines)) {
+      try { this._series.removePriceLine(line); } catch (e) { /* series rebuilt */ }
+      delete this._pendingLines[id];
+    }
+    const wantWatch = this.source === 'nifty' ? 'nifty' : 'premium';
+    for (const po of this._pendingDefs) {
+      if (po.watch !== wantWatch || !po.level) continue;
+      this._pendingLines[po.id] = this._series.createPriceLine({
+        price: po.level, color: PND_COLOR, lineWidth: 1,
+        lineStyle: LWC.LineStyle.Dashed, axisLabelVisible: true,
+        title: `PND ${po.side}${po.dir === 'up' ? '↑' : '↓'}` });
+    }
   }
 
   // ── drag-and-drop level lines ───────────────────────────────────────────
@@ -344,11 +375,7 @@ export class BotChart {
     window.addEventListener('mousemove', e => {
       if (this._dragKey) {
         const price = this._yToPrice(e);
-        if (price != null) {
-          this.levels[this._dragKey] = Math.round(price * 10) / 10;
-          const line = this._priceLines[this._dragKey];
-          if (line) line.applyOptions({ price: this.levels[this._dragKey] });
-        }
+        if (price != null) this._setDragValue(Math.round(price * 10) / 10);
         e.preventDefault();
         return;
       }
@@ -362,16 +389,39 @@ export class BotChart {
       this._dragKey  = null;
       this._dragHold = Date.now() + 2000;   // ignore stale broadcasts briefly
       this.chart.applyOptions({ handleScroll: true, handleScale: true });
-      if (this.onLevelDragEnd) this.onLevelDragEnd(k, this.levels[k]);
+      if (this.onLevelDragEnd) this.onLevelDragEnd(k, this._getDragValue(k));
     });
+  }
+
+  _getDragValue(key) {
+    if (key.startsWith('pnd:')) {
+      const def = this._pendingDefs.find(d => String(d.id) === key.slice(4));
+      return def ? def.level : null;
+    }
+    return this.levels[key];
+  }
+
+  _setDragValue(price) {
+    const key = this._dragKey;
+    if (key.startsWith('pnd:')) {
+      const id = key.slice(4);
+      const def = this._pendingDefs.find(d => String(d.id) === id);
+      if (def) def.level = price;
+      const line = this._pendingLines[id];
+      if (line) line.applyOptions({ price });
+    } else {
+      this.levels[key] = price;
+      const line = this._priceLines[key];
+      if (line) line.applyOptions({ price });
+    }
   }
 
   _draggableKeys() {
     const keys = [];
     if (this.source === 'nifty') keys.push('msl', 'mtp');
-    if ((this.pendingWatch === 'nifty' && this.source === 'nifty')
-        || (this.pendingWatch === 'premium' && this.source === 'option')) {
-      keys.push('pnd');
+    const wantWatch = this.source === 'nifty' ? 'nifty' : 'premium';
+    for (const po of this._pendingDefs) {
+      if (po.watch === wantWatch) keys.push('pnd:' + po.id);
     }
     return keys;
   }
@@ -380,11 +430,20 @@ export class BotChart {
     const rect = this.mainEl.getBoundingClientRect();
     const y = e.clientY - rect.top;
     for (const k of this._draggableKeys()) {
-      if (!this._priceLines[k] || !this.levels[k]) continue;
-      const ly = this._series.priceToCoordinate(this.levels[k]);
+      const price = this._getVal(k);
+      if (!price) continue;
+      const ly = this._series.priceToCoordinate(price);
       if (ly != null && Math.abs(ly - y) <= this.HIT_PX) return k;
     }
     return null;
+  }
+
+  _getVal(key) {
+    if (key.startsWith('pnd:')) {
+      const def = this._pendingDefs.find(d => String(d.id) === key.slice(4));
+      return def ? def.level : 0;
+    }
+    return this.levels[key];
   }
 
   _yToPrice(e) {
@@ -401,11 +460,6 @@ export class BotChart {
     // NIFTY chart: reference + manual NIFTY levels · option chart: trade levels
     const wanted = this.source === 'nifty' ? ['ref', 'msl', 'mtp']
                                            : ['entry', 'sl', 'trail', 'tp'];
-    // pending trigger line lives on whichever chart it watches
-    if ((this.pendingWatch === 'nifty' && this.source === 'nifty')
-        || (this.pendingWatch === 'premium' && this.source === 'option')) {
-      wanted.push('pnd');
-    }
     for (const k of wanted) {
       const price = this.levels[k];
       if (!price) continue;
@@ -414,6 +468,7 @@ export class BotChart {
         price, color: s.color, lineWidth: 1, lineStyle: LWC.LineStyle.Dashed,
         axisLabelVisible: true, title: s.title });
     }
+    this._applyPendingLines();   // pending lines share the source-switch lifecycle
   }
 
   addMarker(kind, tsSec, price, text) {

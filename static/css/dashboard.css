@@ -150,6 +150,16 @@ label { text-transform: uppercase; letter-spacing: .08em; color: var(--text2); f
   padding: 4px 6px; font-family: var(--mono); font-size: 11px; }
 .badge.armed-pulse { background: rgba(77,142,255,.15); border-color: var(--blue);
   color: var(--blue); animation: rpulse 2s ease-in-out infinite; }
+.po-row { display: flex; align-items: center; gap: 8px; padding: 4px 6px;
+  margin-bottom: 4px; background: var(--panel3); border-radius: var(--r2);
+  font-family: var(--mono); font-size: 10px; }
+.po-side { font-weight: 600; padding: 1px 6px; border-radius: 3px; }
+.po-side.ce { background: var(--green-d); color: var(--green); }
+.po-side.pe { background: var(--red-d); color: var(--red); }
+.po-desc { flex: 1; color: var(--text); }
+.po-x { background: none; border: none; color: var(--text2); cursor: pointer;
+  font-size: 11px; padding: 0 4px; }
+.po-x:hover { color: var(--red); }
 
 /* manual NIFTY-level editor */
 .manual-levels { margin-top: 8px; padding: 8px; background: var(--panel2);

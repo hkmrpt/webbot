@@ -36,8 +36,6 @@ socket.on('state', d => {
   }
 
   const ml = d.manual_levels;
-  const po = d.pending_order;
-  chart.pendingWatch = po ? po.watch : null;
   chart.setLevels({
     ref:   d.nifty_ref || 0,
     entry: d.trade_open ? (d.entry || 0) : 0,
@@ -46,10 +44,10 @@ socket.on('state', d => {
     tp:    d.trade_open ? (d.scalp_tp || d.target_price || 0) : 0,
     msl:   ml ? ml.sl : 0,      // manual NIFTY levels → NIFTY chart
     mtp:   ml ? ml.tp : 0,
-    pnd:   po ? po.level : 0,   // pending trigger → its watched chart
   });
+  chart.setPendingOrders(d.pending_orders);   // PND lines on watched charts
   P.updateManualLevels(d);
-  P.updatePendingOrder(d);
+  P.updatePendingOrders(d);
 
   P.updateTicker(d);
   P.updateMode(d);
@@ -149,8 +147,9 @@ document.getElementById('mlApply').addEventListener('click', () => {
 // Drag a level line on the chart → send the new level on release.
 // The server validates and echoes back via state; an invalid drop snaps back.
 chart.onLevelDragEnd = (key, price) => {
-  if (key === 'pnd') {
-    socket.emit('update_pending_order', { level: price });
+  if (price == null) return;
+  if (key.startsWith('pnd:')) {
+    socket.emit('update_pending_order', { id: Number(key.slice(4)), level: price });
   } else {
     socket.emit('set_manual_levels',
       key === 'msl' ? { sl: price } : { tp: price });
@@ -166,9 +165,15 @@ document.getElementById('poArm').addEventListener('click', () => {
     watch: document.getElementById('poWatch').value,
     level,
   });
+  document.getElementById('poLevel').value = '';
 });
-document.getElementById('poCancel').addEventListener('click',
-  () => socket.emit('cancel_pending_order'));
+// per-order ✕ buttons + cancel-all (event delegation on the list)
+document.getElementById('poList').addEventListener('click', e => {
+  const x = e.target.closest('.po-x');
+  if (x) socket.emit('cancel_pending_order', { id: Number(x.dataset.id) });
+});
+document.getElementById('poCancelAll').addEventListener('click',
+  () => socket.emit('cancel_pending_order', {}));
 
 document.getElementById('adoptToggle').addEventListener('change', e => {
   adoptEnabled = e.target.checked;
