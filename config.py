@@ -284,3 +284,14 @@ SCALP_TARGET_PCT          = 2.0   # take profit target % for scalp trades
 SCALP_MICRO_MOVE_PCT      = 0.05  # min cumulative move % to qualify as micro-move
 SCALP_MICRO_CONSISTENCY   = 0.60  # 60% of ticks must go in same direction
 SCALP_MICRO_WINDOW        = 8     # ticks to evaluate micro-momentum
+
+# ── Manual trades: NIFTY-level exits ─────────────────────────────────────────
+# Manual (scalp-manual) trades exit on NIFTY SPOT levels, not option premium.
+# On a manual buy, SL/TP lines are placed at these distances from the current
+# NIFTY level (adjustable live from the dashboard). Premium-based SL / trail /
+# timeout / AI exits are DISABLED for manual trades — only the NIFTY levels,
+# the manual exit button, the 3:25 force-exit, and a catastrophic premium
+# floor can close them.
+MANUAL_NIFTY_SL_PTS        = 15.0  # default SL distance (NIFTY points)
+MANUAL_NIFTY_TP_PTS        = 30.0  # default target distance (NIFTY points)
+MANUAL_MAX_PREMIUM_LOSS_PCT = 50.0 # safety net: premium down this % → exit anyway

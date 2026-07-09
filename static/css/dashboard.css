@@ -139,6 +139,18 @@ label { text-transform: uppercase; letter-spacing: .08em; color: var(--text2); f
   background: var(--panel3); border: 1px solid var(--border2); color: var(--text2);
   letter-spacing: .08em;
 }
+
+/* manual NIFTY-level editor */
+.manual-levels { margin-top: 8px; padding: 8px; background: var(--panel2);
+  border: 1px solid var(--amber); border-radius: var(--r2); }
+.ml-title { font-size: 9px; letter-spacing: .1em; color: var(--amber);
+  margin-bottom: 6px; display: flex; align-items: center; gap: 8px; }
+.ml-row { display: flex; align-items: center; gap: 6px; }
+.ml-row label { font-size: 9px; }
+.ml-row input { flex: 1; min-width: 0; background: var(--panel3);
+  border: 1px solid var(--border2); color: var(--text); border-radius: 3px;
+  padding: 4px 6px; font-family: var(--mono); font-size: 11px; }
+.mini-btn.wide { width: 100%; margin-top: 6px; padding: 5px 0; }
 .badge.long  { background: var(--green-d); border-color: var(--green); color: var(--green); }
 .badge.short { background: var(--red-d);   border-color: var(--red);   color: var(--red); }
 .badge.live  { background: var(--amber-d); border-color: var(--amber); color: var(--amber); }

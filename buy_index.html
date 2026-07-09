@@ -78,6 +78,15 @@
         <button class="big-btn buy-ce" id="btnScalpCE">BUY CE</button>
         <button class="big-btn buy-pe" id="btnScalpPE">BUY PE</button>
       </div>
+      <div class="manual-levels hidden" id="manualLevels">
+        <div class="ml-title">NIFTY EXIT LEVELS <span id="mlSide" class="badge"></span></div>
+        <div class="ml-row">
+          <label>SL</label><input type="number" step="1" id="mlSl">
+          <label>TP</label><input type="number" step="1" id="mlTp">
+        </div>
+        <button class="mini-btn wide" id="mlApply">UPDATE LEVELS</button>
+        <div class="hint">Exits fire when NIFTY crosses a line — premium exits are OFF for this trade</div>
+      </div>
     </section>
 
     <section class="lp-sec hidden" id="adoptSec">

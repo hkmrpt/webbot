@@ -63,6 +63,9 @@ const LEVEL_STYLE = {
   sl:    { color: '#ff3d5c', title: 'SL'    },
   trail: { color: '#ffb020', title: 'TRAIL' },
   tp:    { color: '#00e87a', title: 'TP'    },
+  // Manual-trade NIFTY levels — drawn on the NIFTY chart
+  msl:   { color: '#ff3d5c', title: 'N-SL'  },
+  mtp:   { color: '#00e87a', title: 'N-TP'  },
 };
 
 export class BotChart {
@@ -313,8 +316,9 @@ export class BotChart {
       this._series.removePriceLine(line);
       delete this._priceLines[k];
     }
-    // ref only on nifty chart; entry/sl/trail/tp only on option chart
-    const wanted = this.source === 'nifty' ? ['ref'] : ['entry', 'sl', 'trail', 'tp'];
+    // NIFTY chart: reference + manual NIFTY levels · option chart: trade levels
+    const wanted = this.source === 'nifty' ? ['ref', 'msl', 'mtp']
+                                           : ['entry', 'sl', 'trail', 'tp'];
     for (const k of wanted) {
       const price = this.levels[k];
       if (!price) continue;

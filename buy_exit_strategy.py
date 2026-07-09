@@ -45,6 +45,7 @@ from config import (
     SL_PHASE1_PCT, SL_PHASE1_SECS, SL_PHASE2_PCT,
     MOVE_VELOCITY_WINDOW, FAST_MOVE_VELOCITY,
     PARTIAL_BOOKING_ENABLED, PARTIAL_BOOKING_TARGETS,
+    MANUAL_MAX_PREMIUM_LOSS_PCT,
 )
 
 _csv_lock = threading.Lock()
@@ -264,6 +265,7 @@ class BuyExitStrategy:
         qty_override:            int  | None = None,
         lot_size:                int  | None = None,
         meta:                    dict | None = None,
+        manual_exit_mode:        bool        = False,
         **_kwargs,
     ) -> dict:
         sl_pct = sl_pct_override if sl_pct_override is not None else SL_PHASE1_PCT
@@ -295,6 +297,7 @@ class BuyExitStrategy:
             "lot_size":             int(lot_size) if lot_size else LOT_SIZE,
             "partial_realized_pnl": 0.0,
             "meta":                 dict(meta) if meta else {},
+            "manual_mode":          bool(manual_exit_mode),
             "sl":                   sl,
             "sl_pct":               sl_pct,
             "trail_pct":            init_trail,
@@ -426,6 +429,17 @@ class BuyExitStrategy:
         self._profit_history.append(current_pct)
         if len(self._profit_history) > 30:
             self._profit_history = self._profit_history[-30:]
+
+        # ═════════════════════════════════════════════════════════════════
+        # MANUAL MODE — premium-based exits are DISABLED. The trade exits on
+        # NIFTY spot levels (checked in buy_app on index ticks), the manual
+        # exit button, or the force-exit — plus one catastrophic premium
+        # floor so a frozen index feed can never let the option bleed to 0.
+        # ═════════════════════════════════════════════════════════════════
+        if leg.get("manual_mode"):
+            if current_pct <= -MANUAL_MAX_PREMIUM_LOSS_PCT:
+                return self._close(price, "sl")
+            return None
 
         # ═════════════════════════════════════════════════════════════════
         # EXIT PRECEDENCE — hard risk rules FIRST, learned signals LAST:

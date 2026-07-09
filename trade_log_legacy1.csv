@@ -1,0 +1,2 @@
+date,time,symbol,option_symbol,side,entry,exit_price,qty,lot_qty,pnl,pnl_pct,reason,sl_pct,trail_pct,atr_trail_pct,profit_trail_pct,min_trail_pct_reached,option_atr,peak_profit,peak_profit_pct,held_secs,equity_after
+2026-06-25,17:17:24,,,CE,50.0,52,1,65,130.0,4.0,trail,10.0,2.7,5.0,4.0,3.0,0.8,260.0,8.0,0,10130.0

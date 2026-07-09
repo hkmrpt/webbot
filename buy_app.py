@@ -98,6 +98,7 @@ from config import (
     SCALP_JUMP_MULTIPLIER, SCALP_BREAKEVEN_PCT, SCALP_PROFIT_TRAIL_THRESHOLD,
     SCALP_MICRO_MOVE_PCT, SCALP_MICRO_CONSISTENCY, SCALP_MICRO_WINDOW,
     SCALP_TARGET_PCT,
+    MANUAL_NIFTY_SL_PTS, MANUAL_NIFTY_TP_PTS,
 )
 from buy_exit_strategy import BuyExitStrategy
 from market_brain import MarketBrain
@@ -875,6 +876,7 @@ def _build_state_payload():
         "fast_move_velocity":    FAST_MOVE_VELOCITY,
         "scalp_mode":            S["scalp_mode"],
         "scalp_tp":              round(snap["entry"] * (1 + SCALP_TARGET_PCT / 100), 2) if snap.get("entry") and S["scalp_mode"] != "off" else None,
+        "manual_levels":         S.get("manual_levels"),
 
         "nifty_atm":            S.get("nifty_atm"),
         "atm_pending":          S.get("atm_pending", False),
@@ -1202,11 +1204,37 @@ def process_ticks(ticks):
                 aslot = _active_slot()
                 if aslot and aslot["price"] is not None:
 
+                    # ── Manual-trade NIFTY level exits ────────────────────
+                    # Manual trades are managed on SPOT levels: exit when
+                    # NIFTY crosses the user's SL or TP line. Premium-based
+                    # engine exits are disabled for these trades.
+                    ml = S.get("manual_levels")
+                    if (ml and S["nifty_price"] is not None
+                            and not trade_closed_payload):
+                        n = S["nifty_price"]
+                        hit = None
+                        if ml["side"] == "CE":
+                            if n <= ml["sl"]:   hit = "nifty_sl"
+                            elif n >= ml["tp"]: hit = "nifty_tp"
+                        else:  # PE: adverse = NIFTY up, target = NIFTY down
+                            if n >= ml["sl"]:   hit = "nifty_sl"
+                            elif n <= ml["tp"]: hit = "nifty_tp"
+                        if hit:
+                            exit_result = S["exit_engine"].force_close(
+                                aslot["price"], hit)
+                            if exit_result:
+                                closed = _on_trade_closed_state(exit_result)
+                                trade_closed_payload = closed.get("trade_closed_payload")
+                                order_intent         = closed.get("order_intent")
+                                log_entries.extend(closed.get("logs", []))
+
                     # NIFTY reversal exit: spike has failed when NIFTY retraces
                     # meaningfully past the entry reference level.
                     # Requires a buffer (fraction of spike threshold) to avoid
                     # exiting on 1-tick noise. Also skips if option already in profit.
+                    # (Skipped for manual trades — the user's levels rule.)
                     if (NIFTY_REVERSAL_EXIT
+                            and not S.get("manual_levels")
                             and S["nifty_entry_price"] is not None
                             and S["nifty_price"] is not None
                             and not trade_closed_payload):
@@ -1858,11 +1886,14 @@ def _reset_pending():
 
 
 # ── Enter trade (state mutation only) ────────────────────────────────────────
-def _enter_trade_state(side, nifty_price, override_params: dict | None = None):
+def _enter_trade_state(side, nifty_price, override_params: dict | None = None,
+                       manual_exit: bool = False):
     """
     Called under _state_lock.
     override_params: optional entry params (sl_pct_p1, sl_pct_p2,
                      sl_phase1_secs, trail_pct, timeout_secs).
+    manual_exit: True = exits managed on NIFTY levels, not premium
+                 (scalp-manual trades).
     Returns {trade_opened_payload, order_intent, logs} — no I/O performed here.
     """
     sl        = _slot(side)
@@ -1927,6 +1958,7 @@ def _enter_trade_state(side, nifty_price, override_params: dict | None = None):
         qty_override=qty_lots,
         lot_size=mm_lot_size,
         meta=entry_meta,
+        manual_exit_mode=manual_exit,
     )
 
     S["trade_open"]         = True
@@ -2028,6 +2060,8 @@ def _on_trade_closed_state(result):
         "manual":     "Manual exit (button)",
         "force_exit": "Force-exit (market close)",
         "ai_analyzer":    "AI Analyzer exit (multi-signal)",
+        "nifty_sl":   "NIFTY level SL hit",
+        "nifty_tp":   "NIFTY level TARGET hit 🎯",
     }.get(reason, reason)
 
     color = "success" if pnl_total >= 0 else "error"
@@ -2088,6 +2122,8 @@ def _on_trade_closed_state(result):
             "ai_exit":         COOLDOWN_AFTER_AI_EXIT,
             "nifty_reversal":  COOLDOWN_AFTER_REVERSAL,
             "ai_analyzer":     COOLDOWN_AFTER_AI_EXIT,     # AI-driven exit
+            "nifty_sl":        COOLDOWN_AFTER_SL,
+            "nifty_tp":        COOLDOWN_AFTER_TRAIL_WIN,
             "manual":          0,
             "force_exit":      0,
         }.get(reason, 60)
@@ -2119,6 +2155,7 @@ def _on_trade_closed_state(result):
     S["active_side"]     = None
     S["option_atr"]      = None
     S["fast_entry"]      = False
+    S["manual_levels"]   = None
     S["exit_engine"].reset()
     _reset_pending()
 
@@ -2585,6 +2622,7 @@ def _reset_session_state(idx_token, idx_name):
             "_atm_resolving":     False,
             "last_ws_tick_ts":    0,
             "scalp_mode":         "off",  # never inherit a stale scalp mode
+            "manual_levels":      None,
             "_slope_ind":         RollingSlope(buf),
             "_atr_ind":           RollingATR(RC["jump_atr_window"] + 1),
     })
@@ -3057,11 +3095,24 @@ def on_scalp_manual_buy(data):
             S["nifty_move"] = 0.0
             S["nifty_ref"]  = nifty_price
 
-            result = _enter_trade_state(side, nifty_price, override_params=override)
+            # Manual trades exit on NIFTY spot levels, not premium
+            result = _enter_trade_state(side, nifty_price, override_params=override,
+                                        manual_exit=True)
             if result:
                 trade_opened_payload = result.get("trade_opened_payload")
                 order_intent = result.get("order_intent")
-                log_entries = [("⚡ SCALP MANUAL BUY " + side, "trade")] + result.get("logs", [])
+                if nifty_price:
+                    sl_lvl = nifty_price + (-MANUAL_NIFTY_SL_PTS if side == "CE" else MANUAL_NIFTY_SL_PTS)
+                    tp_lvl = nifty_price + (MANUAL_NIFTY_TP_PTS if side == "CE" else -MANUAL_NIFTY_TP_PTS)
+                    S["manual_levels"] = {"sl": round(sl_lvl, 1), "tp": round(tp_lvl, 1),
+                                          "side": side, "ref": nifty_price}
+                    lvl_log = (f"  NIFTY exit levels: SL={sl_lvl:.1f}  TP={tp_lvl:.1f}  "
+                               f"(adjust in Scalp panel — premium exits OFF)", "info")
+                else:
+                    S["manual_levels"] = None
+                    lvl_log = ("⚠ No NIFTY price — level exits inactive, use EXIT button", "warning")
+                log_entries = ([("⚡ SCALP MANUAL BUY " + side, "trade"), lvl_log]
+                               + result.get("logs", []))
 
     # I/O outside lock — emit() under _state_lock is the v8.1 deadlock pattern
     if err:
@@ -3075,6 +3126,36 @@ def on_scalp_manual_buy(data):
         _emitter.emit("trade_opened", trade_opened_payload)
 
     _run_order_intent(order_intent, trade_opened_payload, None)
+    broadcast()
+
+
+@socketio.on("set_manual_levels")
+def on_set_manual_levels(data):
+    """Adjust the NIFTY SL/TP levels of an open manual trade."""
+    err = None
+    with _state_lock:
+        ml = S.get("manual_levels")
+        if not ml or not S["trade_open"]:
+            err = "No manual trade with NIFTY levels is open"
+        else:
+            try:
+                sl = float(data.get("sl", ml["sl"]))
+                tp = float(data.get("tp", ml["tp"]))
+                n  = S["nifty_price"] or ml.get("ref") or 0
+                # Levels must sit on the correct sides of the market
+                if ml["side"] == "CE" and not (sl < n < tp):
+                    err = f"CE needs SL < NIFTY({n:.1f}) < TP"
+                elif ml["side"] == "PE" and not (tp < n < sl):
+                    err = f"PE needs TP < NIFTY({n:.1f}) < SL"
+                else:
+                    ml["sl"], ml["tp"] = round(sl, 1), round(tp, 1)
+            except (TypeError, ValueError):
+                err = "Levels must be numbers"
+
+    if err:
+        emit("error", {"msg": err})
+        return
+    log(f"🎯 Manual levels updated — SL={data.get('sl')}  TP={data.get('tp')}", "info")
     broadcast()
 
 

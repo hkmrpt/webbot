@@ -105,8 +105,24 @@ export function updateControls(d) {
   show('scalpBtns', mode === 'manual');
   setText('scalpHint',
     mode === 'auto'   ? 'SCALP AUTO — AI micro-move entries, tight SL/trail' :
-    mode === 'manual' ? 'SCALP MANUAL — Buy CE/PE below, AI manages the exit' :
+    mode === 'manual' ? 'SCALP MANUAL — Buy CE/PE; exits on YOUR NIFTY levels (lines on chart)' :
                         'Tight SL/trail for capturing small moves');
+}
+
+/* ── Manual NIFTY-level editor ─────────────────────────────────────────── */
+export function updateManualLevels(d) {
+  const ml = d.manual_levels;
+  const active = !!(ml && d.trade_open);
+  show('manualLevels', active);
+  if (!active) return;
+  setText('mlSide', ml.side || '');
+  // Don't clobber the input while the user is typing in it
+  for (const [id, val] of [['mlSl', ml.sl], ['mlTp', ml.tp]]) {
+    const e = $(id);
+    if (e && document.activeElement !== e && Number(e.value) !== val) {
+      e.value = val;
+    }
+  }
 }
 
 /* ── Spike detector ────────────────────────────────────────────────────── */

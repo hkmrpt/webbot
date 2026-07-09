@@ -1,0 +1,15 @@
+{
+  "weights": {
+    "vol_spike": 1.0,
+    "reversal_pattern": 1.0,
+    "momentum_collapse": 1.0,
+    "profit_decay": 1.0,
+    "volume_dryup": 1.0,
+    "gamma_trap": 1.0,
+    "time_pressure": 1.0,
+    "trend_exhaustion": 1.0,
+    "cascade_risk": 1.0
+  },
+  "n_trades": 24,
+  "n_correct_exits": 3
+}

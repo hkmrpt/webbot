@@ -35,13 +35,17 @@ socket.on('state', d => {
     chart.onTick('option', d.opt_price, now, optVol || 0);
   }
 
+  const ml = d.manual_levels;
   chart.setLevels({
     ref:   d.nifty_ref || 0,
     entry: d.trade_open ? (d.entry || 0) : 0,
     sl:    d.trade_open ? (d.sl || 0) : 0,
     trail: d.trade_open && d.phase2 ? (d.trail_price || 0) : 0,
     tp:    d.trade_open ? (d.scalp_tp || d.target_price || 0) : 0,
+    msl:   ml ? ml.sl : 0,      // manual NIFTY levels → NIFTY chart
+    mtp:   ml ? ml.tp : 0,
   });
+  P.updateManualLevels(d);
 
   P.updateTicker(d);
   P.updateMode(d);
@@ -130,6 +134,13 @@ for (const side of ['CE', 'PE']) {
       socket.emit('scalp_manual_buy', { side });
   });
 }
+
+document.getElementById('mlApply').addEventListener('click', () => {
+  socket.emit('set_manual_levels', {
+    sl: Number(document.getElementById('mlSl').value),
+    tp: Number(document.getElementById('mlTp').value),
+  });
+});
 
 document.getElementById('adoptToggle').addEventListener('change', e => {
   adoptEnabled = e.target.checked;
