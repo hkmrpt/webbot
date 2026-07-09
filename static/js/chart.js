@@ -104,6 +104,12 @@ export class BotChart {
     this.chart.timeScale().subscribeVisibleLogicalRangeChange(r => {
       if (r && r.from < 15) this._fetchOlder();
     });
+
+    // Drag-and-drop for the manual NIFTY level lines (N-SL / N-TP)
+    this.onLevelDragEnd = null;      // callback(levelKey, newPrice)
+    this._dragKey  = null;
+    this._dragHold = 0;              // suppress server overwrites just after a drag
+    this._initLevelDrag();
     this.onOhlc = null;          // callback({o,h,l,c}) for the readout
     this._lastCandles = [];
 
@@ -304,11 +310,75 @@ export class BotChart {
   // ── levels & markers ────────────────────────────────────────────────────
   setLevels(levels) {
     let changed = false;
+    const holding = Date.now() < this._dragHold;
     for (const k of Object.keys(LEVEL_STYLE)) {
+      // Never let a state broadcast yank a line the user is dragging
+      // (or just dropped — the server echo takes a moment to round-trip)
+      if (this._dragKey === k || (holding && (k === 'msl' || k === 'mtp'))) continue;
       const v = levels[k] || 0;
       if (this.levels[k] !== v) { this.levels[k] = v; changed = true; }
     }
     if (changed) this._applyLevels();
+  }
+
+  // ── drag-and-drop level lines ───────────────────────────────────────────
+  DRAGGABLE = ['msl', 'mtp'];
+  HIT_PX    = 7;
+
+  _initLevelDrag() {
+    const el = this.mainEl;
+
+    // capture phase so we beat the library's own pan handler
+    el.addEventListener('mousedown', e => {
+      const k = this._hitLevel(e);
+      if (!k) return;
+      this._dragKey = k;
+      this.chart.applyOptions({ handleScroll: false, handleScale: false });
+      e.preventDefault();
+      e.stopPropagation();
+    }, true);
+
+    window.addEventListener('mousemove', e => {
+      if (this._dragKey) {
+        const price = this._yToPrice(e);
+        if (price != null) {
+          this.levels[this._dragKey] = Math.round(price * 10) / 10;
+          const line = this._priceLines[this._dragKey];
+          if (line) line.applyOptions({ price: this.levels[this._dragKey] });
+        }
+        e.preventDefault();
+        return;
+      }
+      // hover feedback
+      el.style.cursor = this._hitLevel(e) ? 'ns-resize' : '';
+    });
+
+    window.addEventListener('mouseup', () => {
+      if (!this._dragKey) return;
+      const k = this._dragKey;
+      this._dragKey  = null;
+      this._dragHold = Date.now() + 2000;   // ignore stale broadcasts briefly
+      this.chart.applyOptions({ handleScroll: true, handleScale: true });
+      if (this.onLevelDragEnd) this.onLevelDragEnd(k, this.levels[k]);
+    });
+  }
+
+  _hitLevel(e) {
+    if (this.source !== 'nifty') return null;
+    const rect = this.mainEl.getBoundingClientRect();
+    const y = e.clientY - rect.top;
+    for (const k of this.DRAGGABLE) {
+      if (!this._priceLines[k] || !this.levels[k]) continue;
+      const ly = this._series.priceToCoordinate(this.levels[k]);
+      if (ly != null && Math.abs(ly - y) <= this.HIT_PX) return k;
+    }
+    return null;
+  }
+
+  _yToPrice(e) {
+    const rect = this.mainEl.getBoundingClientRect();
+    const p = this._series.coordinateToPrice(e.clientY - rect.top);
+    return (p == null || !isFinite(p)) ? null : p;
   }
 
   _applyLevels() {

@@ -142,6 +142,14 @@ document.getElementById('mlApply').addEventListener('click', () => {
   });
 });
 
+// Drag a level line on the NIFTY chart → send the new level on release.
+// The server validates (SL/TP on correct sides) and echoes back via state;
+// an invalid drop snaps the line back.
+chart.onLevelDragEnd = (key, price) => {
+  socket.emit('set_manual_levels',
+    key === 'msl' ? { sl: price } : { tp: price });
+};
+
 document.getElementById('adoptToggle').addEventListener('change', e => {
   adoptEnabled = e.target.checked;
   if (adoptEnabled) {
