@@ -877,6 +877,7 @@ def _build_state_payload():
         "scalp_mode":            S["scalp_mode"],
         "scalp_tp":              round(snap["entry"] * (1 + SCALP_TARGET_PCT / 100), 2) if snap.get("entry") and S["scalp_mode"] != "off" else None,
         "manual_levels":         S.get("manual_levels"),
+        "pending_order":         S.get("pending_order"),
 
         "nifty_atm":            S.get("nifty_atm"),
         "atm_pending":          S.get("atm_pending", False),
@@ -1177,6 +1178,14 @@ def process_ticks(ticks):
                         trade_opened_payload = result.get("trade_opened_payload")
                         order_intent         = result.get("order_intent")
                         log_entries.extend(result.get("logs", []))
+
+                # ── Pending order: NIFTY-level trigger ────────────────────
+                if not trade_opened_payload:
+                    pend = _check_pending_trigger_locked("nifty", price)
+                    if pend:
+                        trade_opened_payload = pend.get("trade_opened_payload")
+                        order_intent         = pend.get("order_intent") or order_intent
+                        log_entries.extend(pend.get("logs", []))
                 # Check force exit once per Nifty tick (trade must be open)
                 if S["trade_open"]:
                     force_result = _check_force_exit_state()
@@ -1199,6 +1208,14 @@ def process_ticks(ticks):
                     sl["price_history"].append(price)
                     if S["trade_side"] == side:
                         S["option_atr"] = _compute_option_atr(list(sl["price_history"]))
+
+                    # ── Pending order: premium-level trigger ─────────────
+                    if not trade_opened_payload:
+                        pend = _check_pending_trigger_locked("premium", price, side=side)
+                        if pend:
+                            trade_opened_payload = pend.get("trade_opened_payload")
+                            order_intent         = pend.get("order_intent") or order_intent
+                            log_entries.extend(pend.get("logs", []))
 
             if S["active_status"] == "open":
                 aslot = _active_slot()
@@ -1976,12 +1993,17 @@ def _enter_trade_state(side, nifty_price, override_params: dict | None = None,
     jmp_label  = (f"ATR-auto={S['jump_threshold']:.2f}pts" if RC["auto_jump"]
                   else f"fixed={S['jump_threshold']:.2f}pts")
 
+    # Manual/pending entries can fire before slope/move have warmed up
+    _move_lbl  = f"{S['nifty_move']:+.2f}" if S["nifty_move"] is not None else "—"
+    _slope_lbl = (f"{S['regression_slope']:+.3f}"
+                  if S["regression_slope"] is not None else "—")
+
     total_cost = round(opt_price * info["qty"] * mm_lot_size, 2)
     logs = [
         (
             f"▲ BUY {side} [{mode_label}]  entry=₹{opt_price:.2f}  "
-            f"Nifty={nifty_price:.2f}  spike={S['nifty_move']:+.2f}pts  "
-            f"threshold={jmp_label}  slope={S['regression_slope']:+.3f}",
+            f"Nifty={nifty_price:.2f}  spike={_move_lbl}pts  "
+            f"threshold={jmp_label}  slope={_slope_lbl}",
             "trade",
         ),
         (
@@ -2623,6 +2645,7 @@ def _reset_session_state(idx_token, idx_name):
             "last_ws_tick_ts":    0,
             "scalp_mode":         "off",  # never inherit a stale scalp mode
             "manual_levels":      None,
+            "pending_order":      None,
             "_slope_ind":         RollingSlope(buf),
             "_atr_ind":           RollingATR(RC["jump_atr_window"] + 1),
     })
@@ -2854,10 +2877,11 @@ def on_stop():
             t = S["slots"][side]["token"]
             if t:
                 unsub_tokens.append(t)
-        S["running"]      = False
-        S["trade_open"]   = False
-        S["active_sides"] = set()
-        S["trade_side"]   = None
+        S["running"]       = False
+        S["trade_open"]    = False
+        S["active_sides"]  = set()
+        S["trade_side"]    = None
+        S["pending_order"] = None   # stop cancels any armed conditional order
         S["slots"]        = {"CE": _make_opt_slot(), "PE": _make_opt_slot()}
         _reset_pending()
 
@@ -3039,6 +3063,82 @@ def on_toggle_scalp(data):
     broadcast()
 
 
+def _manual_entry_locked(side, tag="⚡ SCALP MANUAL BUY"):
+    """
+    Shared manual-entry path: gates + entry + NIFTY exit levels.
+    Must be called under _state_lock. Used by the Buy CE/PE buttons AND by
+    pending-order triggers. Returns (err, {trade_opened_payload,
+    order_intent, logs}) — no I/O performed here.
+    """
+    err = None
+    if S["scalp_mode"] != "manual":
+        err = "Scalp manual mode not active"
+    elif S["trade_open"]:
+        err = "Trade already open"
+    elif not S["running"]:
+        err = "Robot not running — start first"
+
+    sl = _slot(side)
+    if err is None and (sl["token"] is None or sl["price"] is None):
+        err = f"No {side} option price available"
+
+    # ── HARD risk gates — manual entries are not exempt ─────────────
+    # (daily loss / drawdown / max trades / trade budget / hours /
+    # option price). Cooldown is deliberately skippable for a manual
+    # operator decision.
+    if err is None:
+        ok, gate_reason = _entry_gates_ok()
+        if not ok:
+            err = f"Blocked: {gate_reason}"
+    if err is None and not _is_valid_time():
+        err = "Blocked: outside trading hours"
+    if err is None:
+        opt_ok, opt_reason = _option_price_ok(side)
+        if not opt_ok:
+            err = f"Blocked: {opt_reason}"
+
+    if err is not None:
+        return err, {}
+
+    nifty_price = S["nifty_price"] or 0
+
+    # Build scalp override params
+    override = {
+        "sl_pct_p1":      SCALP_SL_PHASE1_PCT,
+        "sl_pct_p2":      SCALP_SL_PHASE2_PCT,
+        "sl_phase1_secs": SCALP_SL_PHASE1_SECS,
+        "trail_pct":      SCALP_TRAIL_PCT,
+        "timeout_secs":   SCALP_TIMEOUT_SECS,
+    }
+
+    S["fast_entry"] = True
+    S["nifty_move"] = 0.0
+    S["nifty_ref"]  = nifty_price
+
+    # Manual trades exit on NIFTY spot levels, not premium
+    result = _enter_trade_state(side, nifty_price, override_params=override,
+                                manual_exit=True)
+    if not result:
+        return "Entry failed (no option price)", {}
+
+    if nifty_price:
+        sl_lvl = nifty_price + (-MANUAL_NIFTY_SL_PTS if side == "CE" else MANUAL_NIFTY_SL_PTS)
+        tp_lvl = nifty_price + (MANUAL_NIFTY_TP_PTS if side == "CE" else -MANUAL_NIFTY_TP_PTS)
+        S["manual_levels"] = {"sl": round(sl_lvl, 1), "tp": round(tp_lvl, 1),
+                              "side": side, "ref": nifty_price}
+        lvl_log = (f"  NIFTY exit levels: SL={sl_lvl:.1f}  TP={tp_lvl:.1f}  "
+                   f"(adjust in Scalp panel — premium exits OFF)", "info")
+    else:
+        S["manual_levels"] = None
+        lvl_log = ("⚠ No NIFTY price — level exits inactive, use EXIT button", "warning")
+
+    return None, {
+        "trade_opened_payload": result.get("trade_opened_payload"),
+        "order_intent":         result.get("order_intent"),
+        "logs": ([(f"{tag} {side}", "trade"), lvl_log] + result.get("logs", [])),
+    }
+
+
 @socketio.on("scalp_manual_buy")
 def on_scalp_manual_buy(data):
     """Manual scalp entry — user clicks Buy CE or Buy PE."""
@@ -3047,86 +3147,137 @@ def on_scalp_manual_buy(data):
         emit("error", {"msg": f"Invalid side: {side}"})
         return
 
-    trade_opened_payload = None
-    order_intent = None
-    log_entries = []
-
     with _state_lock:
-        err = None
-        if S["scalp_mode"] != "manual":
-            err = "Scalp manual mode not active"
-        elif S["trade_open"]:
-            err = "Trade already open"
-        elif not S["running"]:
-            err = "Robot not running — start first"
-
-        sl = _slot(side)
-        if err is None and (sl["token"] is None or sl["price"] is None):
-            err = f"No {side} option price available"
-
-        # ── HARD risk gates — manual entries are not exempt ─────────────
-        # (daily loss / drawdown / max trades / trade budget / hours /
-        # option price). Cooldown is deliberately skippable for a manual
-        # operator decision.
-        if err is None:
-            ok, gate_reason = _entry_gates_ok()
-            if not ok:
-                err = f"Blocked: {gate_reason}"
-        if err is None and not _is_valid_time():
-            err = "Blocked: outside trading hours"
-        if err is None:
-            opt_ok, opt_reason = _option_price_ok(side)
-            if not opt_ok:
-                err = f"Blocked: {opt_reason}"
-
-        if err is None:
-            nifty_price = S["nifty_price"] or 0
-
-            # Build scalp override params
-            override = {
-                "sl_pct_p1":      SCALP_SL_PHASE1_PCT,
-                "sl_pct_p2":      SCALP_SL_PHASE2_PCT,
-                "sl_phase1_secs": SCALP_SL_PHASE1_SECS,
-                "trail_pct":      SCALP_TRAIL_PCT,
-                "timeout_secs":   SCALP_TIMEOUT_SECS,
-            }
-
-            S["fast_entry"] = True
-            S["nifty_move"] = 0.0
-            S["nifty_ref"]  = nifty_price
-
-            # Manual trades exit on NIFTY spot levels, not premium
-            result = _enter_trade_state(side, nifty_price, override_params=override,
-                                        manual_exit=True)
-            if result:
-                trade_opened_payload = result.get("trade_opened_payload")
-                order_intent = result.get("order_intent")
-                if nifty_price:
-                    sl_lvl = nifty_price + (-MANUAL_NIFTY_SL_PTS if side == "CE" else MANUAL_NIFTY_SL_PTS)
-                    tp_lvl = nifty_price + (MANUAL_NIFTY_TP_PTS if side == "CE" else -MANUAL_NIFTY_TP_PTS)
-                    S["manual_levels"] = {"sl": round(sl_lvl, 1), "tp": round(tp_lvl, 1),
-                                          "side": side, "ref": nifty_price}
-                    lvl_log = (f"  NIFTY exit levels: SL={sl_lvl:.1f}  TP={tp_lvl:.1f}  "
-                               f"(adjust in Scalp panel — premium exits OFF)", "info")
-                else:
-                    S["manual_levels"] = None
-                    lvl_log = ("⚠ No NIFTY price — level exits inactive, use EXIT button", "warning")
-                log_entries = ([("⚡ SCALP MANUAL BUY " + side, "trade"), lvl_log]
-                               + result.get("logs", []))
+        err, bundle = _manual_entry_locked(side)
 
     # I/O outside lock — emit() under _state_lock is the v8.1 deadlock pattern
     if err:
         emit("error", {"msg": err})
         return
 
-    for msg, level in log_entries:
+    for msg, level in bundle.get("logs", []):
         log(msg, level)
 
-    if trade_opened_payload:
-        _emitter.emit("trade_opened", trade_opened_payload)
+    if bundle.get("trade_opened_payload"):
+        _emitter.emit("trade_opened", bundle["trade_opened_payload"])
 
-    _run_order_intent(order_intent, trade_opened_payload, None)
+    _run_order_intent(bundle.get("order_intent"), bundle.get("trade_opened_payload"), None)
     broadcast()
+
+
+# ── Pending (conditional) orders ──────────────────────────────────────────────
+@socketio.on("place_pending_order")
+def on_place_pending_order(data):
+    """
+    Arm a conditional manual order:
+      {side: CE|PE, watch: nifty|premium, level: float}
+    Trigger direction is inferred from placement: level above the current
+    value → fires when crossed UPWARD; below → fires when crossed DOWNWARD.
+    The bot watches every tick and executes the manual entry (with NIFTY
+    exit levels) the moment the level is crossed.
+    """
+    side  = str(data.get("side", "")).upper()
+    watch = str(data.get("watch", "nifty")).lower()
+    err = None
+    with _state_lock:
+        if side not in ("CE", "PE"):
+            err = f"Invalid side: {side}"
+        elif watch not in ("nifty", "premium"):
+            err = f"Invalid watch: {watch}"
+        elif S["scalp_mode"] != "manual":
+            err = "Pending orders need Scalp MANUAL mode"
+        elif S["trade_open"]:
+            err = "Trade already open"
+        elif S.get("pending_order"):
+            err = "A pending order is already armed — cancel it first"
+        else:
+            try:
+                level = round(float(data.get("level")), 2)
+            except (TypeError, ValueError):
+                level = None
+            cur = (S["nifty_price"] if watch == "nifty"
+                   else _slot(side)["price"])
+            if level is None or level <= 0:
+                err = "Level must be a positive number"
+            elif cur is None:
+                err = f"No live {watch} value yet — wait for ticks"
+            elif abs(level - cur) < 1e-9:
+                err = "Level equals the current value — pick a different level"
+            else:
+                po = {
+                    "side": side, "watch": watch, "level": level,
+                    "dir": "up" if level > cur else "down",
+                    "armed_at": round(cur, 2),
+                }
+                S["pending_order"] = po
+    if err:
+        emit("error", {"msg": err})
+        return
+    arrow = "≥" if po["dir"] == "up" else "≤"
+    log(f"⏳ PENDING armed — BUY {side} when {watch.upper()} {arrow} {po['level']}"
+        f"  (now {po['armed_at']})", "warning")
+    broadcast()
+
+
+@socketio.on("update_pending_order")
+def on_update_pending_order(data):
+    """Move the trigger level of the armed pending order (drag on chart)."""
+    err = None
+    with _state_lock:
+        po = S.get("pending_order")
+        if not po:
+            err = "No pending order armed"
+        else:
+            try:
+                level = round(float(data.get("level")), 2)
+                cur = (S["nifty_price"] if po["watch"] == "nifty"
+                       else _slot(po["side"])["price"]) or po["armed_at"]
+                po["level"] = level
+                po["dir"] = "up" if level > cur else "down"
+            except (TypeError, ValueError):
+                err = "Level must be a number"
+    if err:
+        emit("error", {"msg": err})
+        return
+    log(f"⏳ Pending level moved → {data.get('level')}", "info")
+    broadcast()
+
+
+@socketio.on("cancel_pending_order")
+def on_cancel_pending_order(data=None):
+    with _state_lock:
+        had = S.get("pending_order")
+        S["pending_order"] = None
+    if had:
+        log("⏳ Pending order cancelled", "info")
+    broadcast()
+
+
+def _check_pending_trigger_locked(watch_kind, value, side=None):
+    """
+    Called under _state_lock on every relevant tick.
+    Returns the entry bundle when the pending order fires, else None.
+    A trigger that fails its gates cancels the pending order (logged).
+    """
+    po = S.get("pending_order")
+    if not po or po["watch"] != watch_kind or value is None:
+        return None
+    # premium triggers only react to the pending side's own option ticks
+    if watch_kind == "premium" and side is not None and po["side"] != side:
+        return None
+    if S["trade_open"]:
+        S["pending_order"] = None
+        return None
+    crossed = (value >= po["level"]) if po["dir"] == "up" else (value <= po["level"])
+    if not crossed:
+        return None
+
+    S["pending_order"] = None          # one-shot — consumed on trigger
+    err, bundle = _manual_entry_locked(po["side"], tag="⏳→⚡ PENDING TRIGGERED — BUY")
+    if err:
+        bundle = {"logs": [(f"⏳ Pending {po['side']} triggered @{value} but blocked: {err} "
+                            f"— order cancelled", "error")]}
+    return bundle
 
 
 @socketio.on("set_manual_levels")
@@ -3666,6 +3817,19 @@ def _nifty_ltp_poller():
 
 
 if __name__ == "__main__":
+    # Refuse to double-start: Windows lets a second Werkzeug server bind the
+    # same port (SO_REUSEADDR), silently serving STALE code from the first
+    # instance. Probe by connecting — if something answers, bail out loudly.
+    import socket as _sock
+    _probe = _sock.socket(_sock.AF_INET, _sock.SOCK_STREAM)
+    _probe.settimeout(1.0)
+    if _probe.connect_ex(("127.0.0.1", 5001)) == 0:
+        _probe.close()
+        print("FATAL: port 5001 already serving — another buy_app instance "
+              "is running. Stop it first.")
+        raise SystemExit(1)
+    _probe.close()
+
     _subscribe([NIFTY_TOKEN])
     t = threading.Thread(target=_ws_thread, daemon=True)
     t.start()

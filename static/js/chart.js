@@ -66,6 +66,8 @@ const LEVEL_STYLE = {
   // Manual-trade NIFTY levels — drawn on the NIFTY chart
   msl:   { color: '#ff3d5c', title: 'N-SL'  },
   mtp:   { color: '#00e87a', title: 'N-TP'  },
+  // Pending-order trigger — drawn on whichever chart it watches
+  pnd:   { color: '#4d8eff', title: 'PND'   },
 };
 
 export class BotChart {
@@ -84,7 +86,8 @@ export class BotChart {
       option: { hist: [], ticks: [] },
     };
     this.markers  = [];
-    this.levels   = { ref: 0, entry: 0, sl: 0, trail: 0, tp: 0 };
+    this.levels   = { ref: 0, entry: 0, sl: 0, trail: 0, tp: 0, msl: 0, mtp: 0, pnd: 0 };
+    this.pendingWatch = null;    // 'nifty' | 'premium' — where the PND line lives
     this._priceLines = {};
     this.overlays = new Map();   // catalogId -> {series:[...], params}
     this.oscillator = null;      // {id, series:[...], params}
@@ -314,7 +317,8 @@ export class BotChart {
     for (const k of Object.keys(LEVEL_STYLE)) {
       // Never let a state broadcast yank a line the user is dragging
       // (or just dropped — the server echo takes a moment to round-trip)
-      if (this._dragKey === k || (holding && (k === 'msl' || k === 'mtp'))) continue;
+      if (this._dragKey === k
+          || (holding && (k === 'msl' || k === 'mtp' || k === 'pnd'))) continue;
       const v = levels[k] || 0;
       if (this.levels[k] !== v) { this.levels[k] = v; changed = true; }
     }
@@ -322,8 +326,7 @@ export class BotChart {
   }
 
   // ── drag-and-drop level lines ───────────────────────────────────────────
-  DRAGGABLE = ['msl', 'mtp'];
-  HIT_PX    = 7;
+  HIT_PX = 7;
 
   _initLevelDrag() {
     const el = this.mainEl;
@@ -363,11 +366,20 @@ export class BotChart {
     });
   }
 
+  _draggableKeys() {
+    const keys = [];
+    if (this.source === 'nifty') keys.push('msl', 'mtp');
+    if ((this.pendingWatch === 'nifty' && this.source === 'nifty')
+        || (this.pendingWatch === 'premium' && this.source === 'option')) {
+      keys.push('pnd');
+    }
+    return keys;
+  }
+
   _hitLevel(e) {
-    if (this.source !== 'nifty') return null;
     const rect = this.mainEl.getBoundingClientRect();
     const y = e.clientY - rect.top;
-    for (const k of this.DRAGGABLE) {
+    for (const k of this._draggableKeys()) {
       if (!this._priceLines[k] || !this.levels[k]) continue;
       const ly = this._series.priceToCoordinate(this.levels[k]);
       if (ly != null && Math.abs(ly - y) <= this.HIT_PX) return k;
@@ -389,6 +401,11 @@ export class BotChart {
     // NIFTY chart: reference + manual NIFTY levels · option chart: trade levels
     const wanted = this.source === 'nifty' ? ['ref', 'msl', 'mtp']
                                            : ['entry', 'sl', 'trail', 'tp'];
+    // pending trigger line lives on whichever chart it watches
+    if ((this.pendingWatch === 'nifty' && this.source === 'nifty')
+        || (this.pendingWatch === 'premium' && this.source === 'option')) {
+      wanted.push('pnd');
+    }
     for (const k of wanted) {
       const price = this.levels[k];
       if (!price) continue;

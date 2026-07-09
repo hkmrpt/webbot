@@ -125,6 +125,34 @@ export function updateManualLevels(d) {
   }
 }
 
+/* ── Pending order panel ───────────────────────────────────────────────── */
+export function updatePendingOrder(d) {
+  const manual = d.scalp_mode === 'manual';
+  show('pendingBlock', manual);
+  if (!manual) return;
+  const po = d.pending_order;
+  show('poForm', !po);
+  show('poArmed', !!po);
+  show('poBadge', !!po);
+  setClass('poBadge', 'armed-pulse', !!po);
+  if (po) {
+    const arrow = po.dir === 'up' ? '≥' : '≤';
+    const now = po.watch === 'nifty' ? d.nifty_price
+      : (po.side === 'PE' ? d.pe_price : d.ce_price);
+    setText('poStatus',
+      `BUY ${po.side} when ${po.watch.toUpperCase()} ${arrow} ${po.level}` +
+      (now ? `  ·  now ${Number(now).toFixed(1)}` : ''));
+  } else {
+    // placeholder shows the live value of the selected watch source
+    const watchSel = $('poWatch'), sideSel = $('poSide'), lvl = $('poLevel');
+    if (watchSel && lvl && document.activeElement !== lvl) {
+      const now = watchSel.value === 'nifty' ? d.nifty_price
+        : (sideSel.value === 'PE' ? d.pe_price : d.ce_price);
+      if (now) lvl.placeholder = Number(now).toFixed(1);
+    }
+  }
+}
+
 /* ── Spike detector ────────────────────────────────────────────────────── */
 export function updateSpike(d) {
   const thr = d.jump_threshold_pts || 1;

@@ -140,6 +140,17 @@ label { text-transform: uppercase; letter-spacing: .08em; color: var(--text2); f
   letter-spacing: .08em;
 }
 
+/* pending conditional order */
+.pending-order { margin-top: 8px; padding: 8px; background: var(--panel2);
+  border: 1px solid var(--blue); border-radius: var(--r2); }
+.po-title { color: var(--blue) !important; }
+.pending-order .sel { flex: 1; min-width: 0; padding: 4px 4px; }
+.pending-order input { flex: 1.2; min-width: 0; background: var(--panel3);
+  border: 1px solid var(--border2); color: var(--text); border-radius: 3px;
+  padding: 4px 6px; font-family: var(--mono); font-size: 11px; }
+.badge.armed-pulse { background: rgba(77,142,255,.15); border-color: var(--blue);
+  color: var(--blue); animation: rpulse 2s ease-in-out infinite; }
+
 /* manual NIFTY-level editor */
 .manual-levels { margin-top: 8px; padding: 8px; background: var(--panel2);
   border: 1px solid var(--amber); border-radius: var(--r2); }
