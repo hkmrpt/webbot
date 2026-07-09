@@ -1,15 +1,20 @@
 """Manual-trade NIFTY-level exits: premium exits disabled, spot levels rule."""
+from datetime import datetime
+
 import pytest
 
 import buy_app
 import config
 from buy_app import S, RC
 from buy_exit_strategy import BuyExitStrategy
+from core import clock
 
 
 @pytest.fixture
 def manual_trade(monkeypatch):
-    """Open a manual CE trade at NIFTY 24000, option ₹100, levels SL/TP set."""
+    """Open a manual CE trade at NIFTY 24000, option ₹100, levels SL/TP set.
+    Clock pinned to prime hours — otherwise the force-exit (15:25 IST) fires
+    when the suite runs late in the day."""
     snap = {k: S.get(k) for k in
             ("running", "trade_open", "trade_side", "active_side", "active_status",
              "manual_levels", "nifty_price", "nifty_entry_price", "scalp_mode",
@@ -17,6 +22,7 @@ def manual_trade(monkeypatch):
              "day_start_capital", "exit_engine", "slots", "trade_pnl",
              "loss_streak", "cooldown_until", "nifty_prev_tick", "nifty_move",
              "index_token", "last_ws_tick_ts")}
+    clock.set_clock(lambda: datetime(2026, 7, 9, 11, 0, 0))
     with buy_app._state_lock:
         S["running"] = True
         S["capital"] = S["day_start_capital"] = 100_000.0
@@ -37,6 +43,7 @@ def manual_trade(monkeypatch):
         S["slots"]["CE"]["price"] = 100.0
         S["manual_levels"] = {"sl": 23985.0, "tp": 24030.0, "side": "CE", "ref": 24000.0}
     yield eng
+    clock.clear_clock()
     with buy_app._state_lock:
         S.update(snap)
 
