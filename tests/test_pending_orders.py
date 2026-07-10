@@ -155,6 +155,38 @@ def test_poller_ticks_do_not_mark_ws_fresh(armed_session):
     assert S["last_ws_tick_ts"] > 0
 
 
+def test_manual_buy_defaults_to_one_lot(armed_session):
+    """Manual entries never auto-size — qty is the operator's, default 1."""
+    with buy_app._state_lock:
+        err, bundle = buy_app._manual_entry_locked("CE")
+    assert err is None
+    assert S["exit_engine"]._leg["qty"] == 1
+
+    buy_app._close_active_trade(reason="manual")
+    with buy_app._state_lock:
+        err, _ = buy_app._manual_entry_locked("PE", qty_lots=3)
+    assert err is None
+    assert S["exit_engine"]._leg["qty"] == 3
+
+
+def test_pending_order_qty_flows_to_trade(armed_session):
+    """A pending order armed with qty=2 opens a 2-lot trade; orders armed
+    before the qty field existed (no 'qty' key) default to 1."""
+    with buy_app._state_lock:
+        S["pending_orders"].append(
+            {"id": next(_seq), "side": "CE", "watch": "nifty", "level": 24050.0,
+             "dir": "up", "armed_at": 24000.0, "qty": 2})
+    _tick(buy_app.NIFTY_TOKEN, 24060.0)
+    assert S["trade_open"] is True
+    assert S["exit_engine"]._leg["qty"] == 2
+
+    buy_app._close_active_trade(reason="manual")
+    _arm("PE", "nifty", 23950.0, 24000.0)        # legacy dict, no qty key
+    _tick(buy_app.NIFTY_TOKEN, 23940.0)
+    assert S["trade_open"] is True
+    assert S["exit_engine"]._leg["qty"] == 1
+
+
 def test_poller_path_fires_triggers(armed_session):
     """REST gap-fill ticks must evaluate pending triggers (the missed-trigger
     bug: poller data previously bypassed all trigger/exit checks)."""

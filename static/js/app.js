@@ -130,10 +130,13 @@ document.getElementById('scalpSeg').addEventListener('click', e => {
   socket.emit('toggle_scalp_mode', { mode: btn.dataset.scalp });
 });
 
+const lotsOf = id => Math.max(1, parseInt(document.getElementById(id).value, 10) || 1);
+
 for (const side of ['CE', 'PE']) {
   document.getElementById('btnScalp' + side).addEventListener('click', () => {
-    if (confirm(`Scalp BUY ${side} now? AI manages the exit.`))
-      socket.emit('scalp_manual_buy', { side });
+    const qty = lotsOf('scalpQty');
+    if (confirm(`Scalp BUY ${side} × ${qty} lot now? AI manages the exit.`))
+      socket.emit('scalp_manual_buy', { side, qty });
   });
 }
 
@@ -164,6 +167,7 @@ document.getElementById('poArm').addEventListener('click', () => {
     side:  document.getElementById('poSide').value,
     watch: document.getElementById('poWatch').value,
     level,
+    qty:   lotsOf('poQty'),
   });
   document.getElementById('poLevel').value = '';
 });

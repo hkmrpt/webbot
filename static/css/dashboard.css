@@ -131,8 +131,10 @@ label { text-transform: uppercase; letter-spacing: .08em; color: var(--text2); f
 .big-btn.exit { background: var(--amber-d); border-color: var(--amber); color: var(--amber); }
 .big-btn.buy-ce { background: var(--green-d); border-color: var(--green); color: var(--green); }
 .big-btn.buy-pe { background: var(--red-d); border-color: var(--red); color: var(--red); }
-.scalp-btns { display: flex; gap: 6px; }
-.scalp-btns .big-btn { margin-top: 8px; }
+.scalp-btns { display: flex; flex-wrap: wrap; gap: 6px; }
+.scalp-btns .big-btn { margin-top: 8px; flex: 1; }
+.scalp-btns .qty-row { flex-basis: 100%; margin-top: 8px; }
+.pending-order .po-qty { flex: 0.7; }
 
 .badge {
   font-family: var(--mono); font-size: 9px; padding: 2px 8px; border-radius: 20px;

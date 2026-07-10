@@ -54,7 +54,12 @@
       "Bash(curl -s \"http://localhost:5001/api/nifty_historical?interval=minute&from=2026-07-01&to=2026-07-01\")",
       "Bash(curl -s \"http://localhost:5001/api/nifty_historical\")",
       "Bash(curl *)",
-      "Bash(git commit -q -m ' *)"
+      "Bash(git commit -q -m ' *)",
+      "Bash(echo \"EXIT=$?\")",
+      "PowerShell(python -m pytest tests/ -q 2>$null)",
+      "PowerShell(python -m py_compile buy_app.py; if \\($?\\) { \"compile OK\" })",
+      "PowerShell(python -c \"import logging; logging.basicConfig\\(level=logging.DEBUG\\); from Zerodha_api import fetch_balance; print\\('RESULT:', fetch_balance\\(\\)\\)\")",
+      "PowerShell(python -m py_compile buy_app.py Zerodha_api.py; if \\($?\\) { \"compile OK\" }; python -m pytest tests/ -q 2>$null)"
     ]
   }
 }

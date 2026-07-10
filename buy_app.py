@@ -1386,11 +1386,13 @@ def _daily_limit_breached() -> str | None:
     Returns the breach reason or None."""
     if S["session_pnl"] <= -RC["max_daily_loss"]:
         return f"Daily loss limit ₹{RC['max_daily_loss']} hit"
-    if MAX_DRAWDOWN_PCT > 0:
+    # capital-relative limits are meaningless at ₹0 capital (real mode with
+    # an unfunded account) — a zero limit would trip instantly at flat P&L
+    if MAX_DRAWDOWN_PCT > 0 and S["day_start_capital"] > 0:
         drawdown_limit = S["day_start_capital"] * MAX_DRAWDOWN_PCT / 100
         if S["session_pnl"] <= -drawdown_limit:
             return f"Max drawdown {MAX_DRAWDOWN_PCT}% hit — ₹{S['session_pnl']:+.2f}"
-    if DAILY_PROFIT_PCT > 0:
+    if DAILY_PROFIT_PCT > 0 and S["day_start_capital"] > 0:
         day_target = round(S["day_start_capital"] * DAILY_PROFIT_PCT, 2)
         if S["session_pnl"] >= day_target:
             return (
@@ -1401,15 +1403,21 @@ def _daily_limit_breached() -> str | None:
 
 
 def _check_daily_limits():
-    """Must be called under _state_lock. Checks limits and — unlike the pure
-    predicate — STOPS the robot when one is breached. Returns True if trading
+    """Must be called under _state_lock. Marks a breached daily limit but
+    never stops the robot — new entries stay blocked by _entry_gates_ok()
+    while the breach holds, and the robot keeps watching ticks. Announces
+    the breach and writes the daily summary once. Returns True if trading
     may continue."""
     reason = _daily_limit_breached()
     if reason is None:
+        S["_limit_breach_notified"] = False
         return True
     S["last_skip_reason"] = reason
-    if S["running"]:
-        S["running"] = False
+    if not S.get("_limit_breach_notified"):
+        S["_limit_breach_notified"] = True
+        S.setdefault("_deferred_logs", []).append((
+            f"⛔ {reason} — new entries paused, robot stays ON "
+            f"(raise the limit in Settings to resume)", "warning"))
         _write_daily_summary_async(reason)
     return False
 
@@ -1433,6 +1441,33 @@ def _write_daily_summary_async(reason: str):
             app.logger.warning(f"Excel daily summary failed: {exc}")
 
     threading.Thread(target=_do, daemon=True).start()
+
+
+def _sync_live_capital() -> bool:
+    """Fetch the live Kite balance and apply it as capital — ALWAYS, even
+    when the account reports ₹0, so real mode never shows the demo capital.
+    Must be called OUTSIDE _state_lock (does network I/O). Returns True if
+    capital was synced (only an auth/API failure leaves it unchanged)."""
+    bal = fetch_balance()
+    if bal is None:
+        log("⚠ Balance fetch FAILED (auth/API error) — capital unchanged. "
+            "Update the enctoken in Settings.", "warning")
+        return False
+    live_cap = round(bal.get("available", 0), 2)
+    with _state_lock:
+        S["capital"]             = live_cap
+        S["day_start_capital"]   = live_cap
+        S["exit_engine"].capital = live_cap
+    if live_cap <= 0:
+        log(f"⚠ Kite reports ₹0 available funds "
+            f"(net=₹{bal.get('net', 0):,.2f}  cash=₹{bal.get('cash', 0):,.2f}  "
+            f"used=₹{bal.get('used', 0):,.2f}) — real capital is ₹0. "
+            f"Add funds to the Zerodha account before trading.", "warning")
+    else:
+        log(f"💰 Capital synced from Kite — ₹{live_cap:,.2f}  "
+            f"(used=₹{bal.get('used', 0):,.2f}  net=₹{bal.get('net', 0):,.2f}  "
+            f"day target=₹{round(live_cap * DAILY_PROFIT_PCT, 2):,.2f})", "success")
+    return True
 
 
 def _check_force_exit_state():
@@ -1917,13 +1952,16 @@ def _reset_pending():
 
 # ── Enter trade (state mutation only) ────────────────────────────────────────
 def _enter_trade_state(side, nifty_price, override_params: dict | None = None,
-                       manual_exit: bool = False):
+                       manual_exit: bool = False, manual_qty: int | None = None):
     """
     Called under _state_lock.
     override_params: optional entry params (sl_pct_p1, sl_pct_p2,
                      sl_phase1_secs, trail_pct, timeout_secs).
     manual_exit: True = exits managed on NIFTY levels, not premium
                  (scalp-manual trades).
+    manual_qty:  operator-chosen lot count for manual/pending entries —
+                 bypasses auto (ATR/capital) sizing and loss-streak
+                 reduction; still capped by max_lots_per_trade.
     Returns {trade_opened_payload, order_intent, logs} — no I/O performed here.
     """
     sl        = _slot(side)
@@ -1941,7 +1979,9 @@ def _enter_trade_state(side, nifty_price, override_params: dict | None = None,
     capital      = S["capital"]
     cost_per_lot = opt_price * mm_lot_size
 
-    if ATR_POSITION_SIZING:
+    if manual_qty is not None:
+        auto_lots = max(1, int(manual_qty))
+    elif ATR_POSITION_SIZING:
         # ATR-based: risk MAX_RISK_PER_TRADE of capital per trade
         # lots = capital × risk% / (option_ATR × lot_size)
         opt_atr = _compute_option_atr(seed) or (opt_price * 0.05)  # fallback 5% of price
@@ -1953,9 +1993,9 @@ def _enter_trade_state(side, nifty_price, override_params: dict | None = None,
     else:
         auto_lots = max(1, int(capital / cost_per_lot)) if cost_per_lot > 0 else 1
 
-    # Loss streak reduction
+    # Loss streak reduction (auto sizing only — manual qty is the operator's call)
     streak = S.get("loss_streak", 0)
-    if streak >= LOSS_STREAK_REDUCE_AFTER:
+    if manual_qty is None and streak >= LOSS_STREAK_REDUCE_AFTER:
         reductions = min(streak - LOSS_STREAK_REDUCE_AFTER + 1, 3)
         auto_lots = max(1, int(auto_lots * (LOSS_STREAK_SIZE_MULT ** reductions)))
 
@@ -2677,20 +2717,7 @@ def _finish_on_start(mode_str, jmp_str, idx_token, idx_name):
     def _startup_atm_resolve():
         # Load capital based on mode
         if S["trading_mode"] == "real":
-            bal = fetch_balance()
-            if bal and bal.get("available", 0) > 0:
-                live_cap = round(bal["available"], 2)
-                with _state_lock:
-                    S["capital"]           = live_cap
-                    S["day_start_capital"] = live_cap
-                    S["exit_engine"].capital = live_cap
-                log(
-                    f"💰 Capital loaded from Kite — available=₹{live_cap:,.2f}  "
-                    f"(used=₹{bal.get('used',0):,.2f}  net=₹{bal.get('net',0):,.2f})",
-                    "success",
-                )
-            else:
-                log("⚠ Could not fetch live balance — using config capital", "warning")
+            _sync_live_capital()
         else:
             # Demo mode: flat initial capital from config
             with _state_lock:
@@ -3034,21 +3061,8 @@ def on_set_mode(data):
         log("🔴 Switched to REAL TRADING — live orders will be placed!", "error")
         # Fetch live balance and update capital + day target immediately
         def _sync_capital():
-            bal = fetch_balance()
-            if bal and bal.get("available", 0) > 0:
-                live_cap = round(bal["available"], 2)
-                with _state_lock:
-                    S["capital"]             = live_cap
-                    S["day_start_capital"]   = live_cap
-                    S["exit_engine"].capital  = live_cap
-                log(
-                    f"💰 Capital synced from Kite — ₹{live_cap:,.2f}  "
-                    f"(day target = ₹{round(live_cap * DAILY_PROFIT_PCT, 2):,.2f})",
-                    "success",
-                )
+            if _sync_live_capital():
                 broadcast()
-            else:
-                log("⚠ Could not fetch live balance — capital unchanged", "warning")
         threading.Thread(target=_sync_capital, daemon=True).start()
     else:
         with _state_lock:
@@ -3076,12 +3090,13 @@ def on_toggle_scalp(data):
     broadcast()
 
 
-def _manual_entry_locked(side, tag="⚡ SCALP MANUAL BUY"):
+def _manual_entry_locked(side, tag="⚡ SCALP MANUAL BUY", qty_lots=1):
     """
     Shared manual-entry path: gates + entry + NIFTY exit levels.
     Must be called under _state_lock. Used by the Buy CE/PE buttons AND by
-    pending-order triggers. Returns (err, {trade_opened_payload,
-    order_intent, logs}) — no I/O performed here.
+    pending-order triggers. qty_lots is the operator-chosen lot count
+    (default 1 — manual trades never auto-size). Returns (err,
+    {trade_opened_payload, order_intent, logs}) — no I/O performed here.
     """
     err = None
     if S["scalp_mode"] != "manual":
@@ -3130,7 +3145,7 @@ def _manual_entry_locked(side, tag="⚡ SCALP MANUAL BUY"):
 
     # Manual trades exit on NIFTY spot levels, not premium
     result = _enter_trade_state(side, nifty_price, override_params=override,
-                                manual_exit=True)
+                                manual_exit=True, manual_qty=qty_lots)
     if not result:
         return "Entry failed (no option price)", {}
 
@@ -3152,6 +3167,14 @@ def _manual_entry_locked(side, tag="⚡ SCALP MANUAL BUY"):
     }
 
 
+def _parse_manual_qty(value):
+    """Lot count from the UI — invalid/missing means the default of 1."""
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return 1
+
+
 @socketio.on("scalp_manual_buy")
 def on_scalp_manual_buy(data):
     """Manual scalp entry — user clicks Buy CE or Buy PE."""
@@ -3159,9 +3182,10 @@ def on_scalp_manual_buy(data):
     if side not in ("CE", "PE"):
         emit("error", {"msg": f"Invalid side: {side}"})
         return
+    qty = _parse_manual_qty(data.get("qty"))
 
     with _state_lock:
-        err, bundle = _manual_entry_locked(side)
+        err, bundle = _manual_entry_locked(side, qty_lots=qty)
 
     # I/O outside lock — emit() under _state_lock is the v8.1 deadlock pattern
     if err:
@@ -3224,14 +3248,15 @@ def on_place_pending_order(data):
                     "side": side, "watch": watch, "level": level,
                     "dir": "up" if level > cur else "down",
                     "armed_at": round(cur, 2),
+                    "qty": _parse_manual_qty(data.get("qty")),
                 }
                 orders.append(po)
     if err:
         emit("error", {"msg": err})
         return
     arrow = "≥" if po["dir"] == "up" else "≤"
-    log(f"⏳ PENDING #{po['id']} armed — BUY {side} when {watch.upper()} {arrow} "
-        f"{po['level']}  (now {po['armed_at']})", "warning")
+    log(f"⏳ PENDING #{po['id']} armed — BUY {side} ×{po['qty']} lot when "
+        f"{watch.upper()} {arrow} {po['level']}  (now {po['armed_at']})", "warning")
     broadcast()
 
 
@@ -3313,7 +3338,8 @@ def _check_pending_triggers_locked(watch_kind, value, side=None):
             return {"logs": [(f"⏳ Pending #{po['id']} {po['side']} @{po['level']} crossed "
                               f"but robot NOT RUNNING — order cancelled", "error")]}
 
-        err, bundle = _manual_entry_locked(po["side"], tag="⏳→⚡ PENDING TRIGGERED — BUY")
+        err, bundle = _manual_entry_locked(po["side"], tag="⏳→⚡ PENDING TRIGGERED — BUY",
+                                           qty_lots=po.get("qty", 1))
         if err:
             return {"logs": [(f"⏳ Pending #{po['id']} {po['side']} triggered @{value} "
                               f"but blocked: {err} — order cancelled", "error")]}

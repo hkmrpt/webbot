@@ -43,6 +43,37 @@ def test_daily_limit_ok_when_flat(clean_session):
     assert buy_app._daily_limit_breached() is None
 
 
+def test_zero_capital_does_not_trip_limits(clean_session):
+    """Real mode with an unfunded account (capital ₹0) must not instantly
+    breach drawdown/profit-target — those limits scale with capital."""
+    S["running"] = True
+    S["day_start_capital"] = 0.0
+    S["session_pnl"] = 0.0
+    assert buy_app._daily_limit_breached() is None
+
+
+def test_daily_limit_breach_never_stops_robot(clean_session):
+    """A breached limit pauses entries but must NOT flip running=False;
+    the breach is announced once (deferred log), not on every tick."""
+    S["running"] = True
+    S["day_start_capital"] = 100_000.0
+    S["session_pnl"] = -(RC["max_daily_loss"] + 1)
+    S["_limit_breach_notified"] = False
+    S["_deferred_logs"] = []
+
+    assert buy_app._check_daily_limits() is False
+    assert S["running"] is True, "limit breach must not stop the robot"
+    assert len(S["_deferred_logs"]) == 1
+
+    assert buy_app._check_daily_limits() is False   # second breach check
+    assert len(S["_deferred_logs"]) == 1, "breach announced only once"
+
+    S["session_pnl"] = 0.0                          # breach cleared
+    assert buy_app._check_daily_limits() is True
+    assert S["_limit_breach_notified"] is False, "flag resets when clear"
+    S.pop("_deferred_logs", None)
+
+
 # ── Hard entry gates (shared by auto + manual paths) ─────────────────────────
 
 def _healthy_session():

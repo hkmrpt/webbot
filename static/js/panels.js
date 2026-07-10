@@ -138,13 +138,14 @@ export function updatePendingOrders(d) {
   show('poForm', orders.length < 4);
   show('poCancelAll', orders.length > 1);
 
-  const key = orders.map(o => `${o.id}:${o.level}:${o.dir}`).join('|');
+  const key = orders.map(o => `${o.id}:${o.level}:${o.dir}:${o.qty}`).join('|');
   if (key !== _poRendered) {
     _poRendered = key;
     $('poList').innerHTML = orders.map(o => {
       const arrow = o.dir === 'up' ? '≥' : '≤';
+      const qty = o.qty > 1 ? ` ×${o.qty}` : '';
       return `<div class="po-row">
-        <span class="po-side ${o.side.toLowerCase()}">${o.side}</span>
+        <span class="po-side ${o.side.toLowerCase()}">${o.side}${qty}</span>
         <span class="po-desc">${o.watch === 'nifty' ? 'NIFTY' : 'PREM'} ${arrow} ${o.level}</span>
         <button class="po-x" data-id="${o.id}" title="cancel">✕</button>
       </div>`;

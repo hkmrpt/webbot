@@ -217,12 +217,18 @@ def fetch_balance() -> dict | None:
         if data.get("status") != "success":
             logger.error("fetch_balance: API error — %s", data.get("message", raw[:200]))
             return None
-        eq = data["data"]["equity"]
+        eq    = data["data"]["equity"]
+        avail = eq.get("available", {})
+        # live_balance is the primary field; some accounts report funds only
+        # under cash (no margin blocked yet) — fall back to cash, then net.
+        available = (avail.get("live_balance", 0) or avail.get("cash", 0)
+                     or eq.get("net", 0))
         return {
             "net":           round(eq.get("net", 0), 2),
-            "available":     round(eq["available"].get("live_balance", 0), 2),
+            "available":     round(available, 2),
+            "cash":          round(avail.get("cash", 0), 2),
             "used":          round(eq["utilised"].get("debits", 0), 2),
-            "intraday_payin": round(eq["available"].get("intraday_payin", 0), 2),
+            "intraday_payin": round(avail.get("intraday_payin", 0), 2),
         }
     except Exception as exc:
         logger.error("fetch_balance error: %s", exc)
