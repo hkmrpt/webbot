@@ -46,6 +46,13 @@ from config import (
     MOVE_VELOCITY_WINDOW, FAST_MOVE_VELOCITY,
     PARTIAL_BOOKING_ENABLED, PARTIAL_BOOKING_TARGETS,
     MANUAL_MAX_PREMIUM_LOSS_PCT,
+    ADAPTIVE_TIMEOUT_ENABLED,
+    TIMEOUT_STALL_MOMENTUM, TIMEOUT_EXTEND_MOMENTUM,
+    TIMEOUT_MIN_FACTOR, TIMEOUT_MAX_FACTOR,
+    OCO_EXIT_ENABLED, OCO_CANDLE_TICKS, OCO_LOOKBACK_TICKS,
+    OCO_SUPPORT_CANDLES, OCO_GRACE_SECS, OCO_MIN_TARGET_ATR,
+    TARGET_LIMIT_PCT,
+    AI_TP_ENABLED, AI_TP_HOLD_MOMENTUM, AI_TP_LOCK_FRACTION,
 )
 
 _csv_lock = threading.Lock()
@@ -232,6 +239,72 @@ def _classify_move(prices: deque, window: int) -> str:
     return "fast" if avg_vel >= FAST_MOVE_VELOCITY else "slow"
 
 
+# ── Adaptive timeout + OCO bracket (v9.6) ─────────────────────────────────────
+def _adaptive_timeout_factor(momentum_score: float | None) -> float:
+    """
+    Stretch/shrink factor for the trade timeout, decided by the tick-derived
+    momentum score (ExitBrain, 0–1, ~0.34 on a dead tape):
+      score ≤ STALL   → TIMEOUT_MIN_FACTOR (tape is dead — stop waiting)
+      score ≥ EXTEND  → linear ramp 1.0 → TIMEOUT_MAX_FACTOR (move developing)
+      in between      → 1.0 (base timeout unchanged)
+    """
+    if not ADAPTIVE_TIMEOUT_ENABLED or momentum_score is None:
+        return 1.0
+    if momentum_score <= TIMEOUT_STALL_MOMENTUM:
+        return TIMEOUT_MIN_FACTOR
+    if momentum_score >= TIMEOUT_EXTEND_MOMENTUM:
+        t = (momentum_score - TIMEOUT_EXTEND_MOMENTUM) / max(
+            1e-9, 1.0 - TIMEOUT_EXTEND_MOMENTUM)
+        return round(1.0 + min(t, 1.0) * (TIMEOUT_MAX_FACTOR - 1.0), 2)
+    return 1.0
+
+
+def _build_pseudo_candles(prices: list, ticks_per_candle: int) -> list:
+    """Group ticks into OHLC pseudo-candles, oldest → newest."""
+    candles = []
+    for i in range(0, len(prices), ticks_per_candle):
+        chunk = prices[i:i + ticks_per_candle]
+        if len(chunk) < 2:
+            continue
+        candles.append({"open": chunk[0], "high": max(chunk),
+                        "low": min(chunk), "close": chunk[-1]})
+    return candles
+
+
+def _compute_oco_levels(prices: list, current_price: float,
+                        atr: float | None, hard_sl: float):
+    """
+    Derive the timeout OCO bracket from recent tick/candle structure:
+      target — swing high of the lookback candles (resistance the move must
+               reclaim to justify holding), at least OCO_MIN_TARGET_ATR
+               option-ATRs above the current price
+      floor  — swing low of the newest OCO_SUPPORT_CANDLES candles (support),
+               clamped so it can never sit below the hard SL
+    Returns (target, floor), or None when the structure is degenerate —
+    too little history, or price already below its own support — in which
+    case the caller falls back to the plain timeout exit.
+    """
+    if len(prices) < OCO_CANDLE_TICKS * 3:
+        return None
+    candles = _build_pseudo_candles(prices[-OCO_LOOKBACK_TICKS:], OCO_CANDLE_TICKS)
+    if len(candles) < 3:
+        return None
+
+    swing_high = max(c["high"] for c in candles)
+    recent     = candles[-OCO_SUPPORT_CANDLES:]
+    swing_low  = min(c["low"] for c in recent)
+
+    min_room = (atr or 0.0) * OCO_MIN_TARGET_ATR
+    if min_room <= 0:
+        min_room = current_price * 0.001   # 0.1% fallback when ATR unknown
+
+    target = round(max(swing_high, current_price + min_room), 2)
+    floor  = round(max(swing_low, hard_sl), 2)
+    if floor >= current_price or target <= current_price:
+        return None
+    return target, floor
+
+
 # ── Strategy class ────────────────────────────────────────────────────────────
 class BuyExitStrategy:
 
@@ -240,6 +313,7 @@ class BuyExitStrategy:
         self._leg                = None
         self._open_time          = None
         self._opt_price_hist     = deque(maxlen=OPTION_ATR_PERIOD + 1)
+        self._tick_hist          = deque(maxlen=OCO_LOOKBACK_TICKS)   # OCO swing levels
         self._trail_pct_override = None
         self._brain              = ExitBrain()          # AI brain — persists across trades
         self._exit_analyzer      = ExitAnalyzer()      # 10-signal exit analysis engine
@@ -259,6 +333,7 @@ class BuyExitStrategy:
         sl_pct_p2_override:      float | None = None,
         sl_phase1_secs_override: float | None = None,
         timeout_secs_override:   float | None = None,
+        tp_pct_override:         float | None = None,
         seed_prices:             list  | None = None,
         symbol:                  str         = "",
         option_symbol:           str         = "",
@@ -279,6 +354,12 @@ class BuyExitStrategy:
             for p in seed_prices[-(OPTION_ATR_PERIOD + 1):]:
                 self._opt_price_hist.append(p)
         self._opt_price_hist.append(entry_price)
+
+        self._tick_hist = deque(maxlen=OCO_LOOKBACK_TICKS)
+        if seed_prices:
+            for p in seed_prices[-OCO_LOOKBACK_TICKS:]:
+                self._tick_hist.append(p)
+        self._tick_hist.append(entry_price)
 
         qty = qty_override if (qty_override is not None and qty_override >= 1) else BUY_QTY
         self._partial_done  = []
@@ -317,6 +398,15 @@ class BuyExitStrategy:
             "_sl_pct_p2":           sl_pct_p2_override,
             "_sl_phase1_secs":      sl_phase1_secs_override,
             "_timeout_secs":        timeout_secs_override,
+            # AI take-profit reference (None = config TARGET_LIMIT_PCT)
+            "_tp_pct":              tp_pct_override,
+            "tp_riding":            False,
+            # Adaptive-timeout / OCO bracket state
+            "timeout_eff_secs":     None,
+            "oco_armed":            False,
+            "oco_target":           None,
+            "oco_floor":            None,
+            "oco_deadline_secs":    None,
             "open":                 True,
         }
         self._open_time = _now()
@@ -332,6 +422,7 @@ class BuyExitStrategy:
         elapsed  = (_now() - self._open_time).total_seconds() if self._open_time else 0
 
         self._opt_price_hist.append(price)
+        self._tick_hist.append(price)
 
         atr               = _compute_option_atr(list(self._opt_price_hist))
         leg["option_atr"] = atr
@@ -420,9 +511,12 @@ class BuyExitStrategy:
             leg["trail_price"] = max(new_trail, prev_trail)
 
         # Timeout: per-trade override (the entry verdict always supplies one),
-        # config default as safety net. The old move-type timeout branch was
-        # unreachable — every entry path passes a timeout override.
+        # config default as safety net. The base timeout is then stretched or
+        # shrunk each tick by the momentum of the option's own recent ticks —
+        # a developing move gets more room, a dead tape gets cut short.
         timeout_secs   = leg["_timeout_secs"] if leg["_timeout_secs"] is not None else TRADE_TIMEOUT_SECS
+        eff_timeout    = round(timeout_secs * _adaptive_timeout_factor(momentum_score), 1)
+        leg["timeout_eff_secs"] = eff_timeout
         min_profit_pct = TRADE_TIMEOUT_MIN_PROFIT
 
         # Track profit history for decay detection
@@ -446,7 +540,9 @@ class BuyExitStrategy:
         #   1. hard SL          (never outranked by anything)
         #   2. trailing stop
         #   3. partial booking  (only reached if no hard exit this tick)
-        #   4. timeout
+        #   3.5 AI take-profit  (target% is a reference — momentum decides
+        #                        book-now vs ride-the-trail)
+        #   4. timeout          (adaptive) / OCO bracket
         #   5. AI analyzer      (warmup-gated inside ExitAnalyzer)
         #   6. brain decay      (warmup-gated inside ExitBrain)
         # ═════════════════════════════════════════════════════════════════
@@ -514,9 +610,49 @@ class BuyExitStrategy:
                             print(f"[CSV] partial write error: {e}")
                         return event
 
-        # 4. Timeout
-        if elapsed >= timeout_secs and current_pct < min_profit_pct:
-            return self._close(price, "timeout")
+        # 3.5 AI take-profit — the configured target% is a REFERENCE, not an
+        #     order. At/above it the tick-derived momentum decides every tick:
+        #     still pushing → ride the trail, but first ratchet the SL to lock
+        #     most of the reached target (the ride can never give it back
+        #     below the lock); fading → book the profit now.
+        tp_pct = leg["_tp_pct"] if leg["_tp_pct"] is not None else TARGET_LIMIT_PCT
+        if AI_TP_ENABLED and tp_pct > 0 and current_pct >= tp_pct:
+            if momentum_score < AI_TP_HOLD_MOMENTUM:
+                return self._close(price, "ai_tp")
+            lock_sl = round(leg["entry"] * (1 + tp_pct * AI_TP_LOCK_FRACTION / 100), 2)
+            if lock_sl > leg["sl"]:
+                leg["sl"] = lock_sl
+            leg["tp_riding"] = True
+
+        # 4. Timeout — adaptive deadline, then a virtual OCO bracket instead of
+        #    an instant market exit. Target = recent swing high, floor = recent
+        #    swing low (never below the hard SL, which slots 1–2 still enforce
+        #    first every tick). First level touched wins; OCO_GRACE_SECS caps
+        #    the extra hold and falls back to the plain timeout exit.
+        if leg["oco_armed"]:
+            if price >= leg["oco_target"]:
+                return self._close(price, "oco_target")
+            if price <= leg["oco_floor"]:
+                return self._close(price, "oco_floor")
+            if elapsed >= leg["oco_deadline_secs"]:
+                return self._close(price, "timeout")
+        elif elapsed >= eff_timeout and current_pct < min_profit_pct:
+            levels = (_compute_oco_levels(list(self._tick_hist), price,
+                                          atr, leg["sl"])
+                      if OCO_EXIT_ENABLED else None)
+            if levels is None:
+                return self._close(price, "timeout")
+            leg["oco_armed"]         = True
+            leg["oco_target"], leg["oco_floor"] = levels
+            leg["oco_deadline_secs"] = elapsed + OCO_GRACE_SECS
+            return {
+                "event_type": "oco_armed",
+                "target":     leg["oco_target"],
+                "floor":      leg["oco_floor"],
+                "grace_secs": OCO_GRACE_SECS,
+                "price":      price,
+                "side":       leg["side"],
+            }
 
         # 5. 10-Signal AI Exit Analyzer (no authority during warmup — only the
         #    mechanical cascade_risk crash protector stays live)
@@ -644,6 +780,14 @@ class BuyExitStrategy:
             "move_type":            self._leg["move_type"],
             "partial_realized_pnl": self._leg.get("partial_realized_pnl", 0.0),
             "momentum_score":       self._leg.get("momentum_score", 0.5),
+            "timeout_eff_secs":     self._leg.get("timeout_eff_secs"),
+            "tp_riding":            self._leg.get("tp_riding", False),
+            "tp_ref_pct":           (self._leg.get("_tp_pct")
+                                     if self._leg.get("_tp_pct") is not None
+                                     else TARGET_LIMIT_PCT),
+            "oco_armed":            self._leg.get("oco_armed", False),
+            "oco_target":           self._leg.get("oco_target"),
+            "oco_floor":            self._leg.get("oco_floor"),
             "brain":                self._brain.state,
             "exit_analyzer":        self._exit_analyzer.state,
             "open":                 self._leg["open"],
@@ -654,6 +798,7 @@ class BuyExitStrategy:
         self._leg                = None
         self._open_time          = None
         self._opt_price_hist     = deque(maxlen=OPTION_ATR_PERIOD + 1)
+        self._tick_hist          = deque(maxlen=OCO_LOOKBACK_TICKS)
         self._trail_pct_override = None
         self._partial_done       = []
         self._original_qty       = 1

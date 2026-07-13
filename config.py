@@ -157,6 +157,26 @@ FAST_MOVE_VELOCITY     = 2.0       # avg pts/tick — above = fast move
 TRADE_TIMEOUT_SECS        = 50     # general timeout reduced
 TRADE_TIMEOUT_MIN_PROFIT  = 0.5    # exit if barely profitable after timeout
 
+# ── Adaptive timeout + OCO timeout exit (v9.6) ────────────────
+# The fixed timeout dumped flat trades at market on the exact second,
+# even mid-move. Now the effective timeout scales with tick momentum
+# (ExitBrain score over the option's own tick history), and when it
+# expires the engine arms a virtual OCO bracket — target at the recent
+# swing high, floor at the recent swing low (never below the hard SL) —
+# built from pseudo-candles of previous ticks. First level touched
+# wins; OCO_GRACE_SECS caps the extra hold. SL/trail always outrank it.
+ADAPTIVE_TIMEOUT_ENABLED  = True
+TIMEOUT_STALL_MOMENTUM    = 0.35   # momentum ≤ this = dead tape → shrink timeout
+TIMEOUT_EXTEND_MOMENTUM   = 0.60   # momentum ≥ this = still moving → extend
+TIMEOUT_MIN_FACTOR        = 0.5    # stalled: exit at base × 0.5
+TIMEOUT_MAX_FACTOR        = 2.5    # developing: wait up to base × 2.5
+OCO_EXIT_ENABLED          = True
+OCO_CANDLE_TICKS          = 5      # ticks per pseudo-candle for swing levels
+OCO_LOOKBACK_TICKS        = 60     # tick history scanned for swings
+OCO_SUPPORT_CANDLES       = 6      # newest candles used for the floor (support)
+OCO_GRACE_SECS            = 30     # hard deadline once the bracket is armed
+OCO_MIN_TARGET_ATR        = 1.0    # target ≥ this many option-ATRs above price
+
 # ── Consolidation Range Detection ─────────────────────────────
 RANGE_WINDOW     = 20              # ticks for range detection
 RANGE_MIN_TICKS  = 10              # minimum ticks before range is valid
@@ -201,6 +221,49 @@ NIFTY_EXPIRY_WEEKDAY   = 1         # 0=Mon 1=Tue 2=Wed 3=Thu 4=Fri
 # After a real BUY fills, a standing LIMIT SELL is placed at
 # entry × (1 + pct/100). Scalp mode uses SCALP_TARGET_PCT instead.
 TARGET_LIMIT_PCT       = 2.5
+
+# ── AI take-profit decision (v9.6) ────────────────────────────
+# The target% above is a REFERENCE level, not a mechanical exit. When
+# the premium reaches it, the ExitBrain momentum score (from the
+# option's own recent ticks) decides every tick:
+#   momentum ≥ AI_TP_HOLD_MOMENTUM → keep riding the trail; the SL is
+#     first ratcheted to lock AI_TP_LOCK_FRACTION of the target profit,
+#     so riding can never give the reached target back below the lock
+#   momentum <  AI_TP_HOLD_MOMENTUM → book the profit now (reason ai_tp)
+# In real mode the standing LIMIT SELL moves out to
+# target% × AI_TP_SAFETY_TARGET_MULT — a disconnect safety net and
+# spike catcher instead of a winner-capping order.
+AI_TP_ENABLED            = True
+AI_TP_HOLD_MOMENTUM      = 0.50   # ≥ neutral momentum = market still pushing
+AI_TP_LOCK_FRACTION      = 0.70   # lock 70% of target profit while riding
+AI_TP_SAFETY_TARGET_MULT = 2.0    # real-mode standing sell distance multiplier
+
+# ── AI position sizing (v9.6) ─────────────────────────────────
+# Lots per auto trade are decided by PositionSizer (position_sizer.py)
+# from the live session, not a static formula:
+#   warmup     — day starts at SIZER_WARMUP_FACTOR×, ramping to 1× after
+#                SIZER_WARMUP_TRADES trades (prove the day first)
+#   recovery   — consecutive losses size UP by SIZER_RECOVERY_STEP each,
+#                capped at SIZER_RECOVERY_MAX× …
+#   budget     — … but the remaining daily-loss budget is a HARD cap:
+#                lots can never risk more than what's left of
+#                MAX_DAILY_LOSS at the trade's own worst-case hard SL
+#   capital    — never more lots than available capital can buy
+#   confidence — ML entry score scales SIZER_CONF_MIN×–SIZER_CONF_MAX×
+#   learned    — EWMA multiplier taught by closed trades (mode-tagged,
+#                demo fills never train real-money sizing)
+# Manual/pending-order qty stays the operator's call (never auto-sized).
+AI_SIZER_ENABLED    = True
+SIZER_WARMUP_TRADES = 3       # trades to reach full size from day start
+SIZER_WARMUP_FACTOR = 0.5     # first-trade-of-day size fraction
+SIZER_RECOVERY_STEP = 0.25    # +25% size per consecutive loss …
+SIZER_RECOVERY_MAX  = 1.75    # … capped (bounded, budget-capped martingale)
+SIZER_CONF_MIN      = 0.7     # weakest-signal size multiplier
+SIZER_CONF_MAX      = 1.3     # strongest-signal size multiplier
+SIZER_LEARN_RATE    = 0.10    # EWMA step for the learned multiplier
+SIZER_MULT_MIN      = 0.6     # learned multiplier floor
+SIZER_MULT_MAX      = 1.5     # learned multiplier ceiling
+SIZER_STATE_FILE    = "position_sizer_state.json"
 
 # ── Advanced Entry Filters (v8.5) ─────────────────────────────
 # Breakout filter — spike must clear the prior consolidation range

@@ -105,6 +105,7 @@ from market_brain import MarketBrain
 from volatility_detector import VolatilityDetector
 from entry_analyzer import EntryAnalyzer
 from market_intelligence import MarketIntelligence
+from position_sizer import PositionSizer
 from position_sync import detect_open_positions, build_adoption_params, detect_position_changes
 from option_chain_intel import VIXTracker, OptionChainAnalyzer, MultiTimeframeAnalyzer, VIX_TOKEN
 from zerodha_websocket import connect_zerodha_websocket
@@ -155,6 +156,7 @@ _state_lock      = threading.Lock()
 _market_brain    = MarketBrain()          # Global NIFTY AI brain
 _entry_analyzer  = EntryAnalyzer()       # 8-dimension entry analysis engine
 _market_intel    = MarketIntelligence()  # historical + day-type intelligence
+_position_sizer  = PositionSizer()       # AI lot sizing (warmup/recovery/budget)
 _vix_tracker     = VIXTracker()         # India VIX live tracking
 _oi_analyzer     = OptionChainAnalyzer() # option chain OI/PCR analysis
 _mtf_analyzer    = MultiTimeframeAnalyzer() # multi-timeframe trend
@@ -179,6 +181,8 @@ from engine.indicators import RollingSlope, RollingATR
 # for the replay/backtest harness. Hot-path cost: one queue.put_nowait.
 from replay.recorder import TickRecorder
 from config import TICK_RECORDING_ENABLED, TICK_DIR, TARGET_LIMIT_PCT
+from config import AI_TP_ENABLED, AI_TP_SAFETY_TARGET_MULT
+from config import AI_SIZER_ENABLED
 _recorder = TickRecorder(TICK_DIR, TICK_RECORDING_ENABLED)
 
 # Separate lock for the log buffer so logging never blocks trading state.
@@ -824,7 +828,9 @@ def _build_state_payload():
         "live_pnl":             live_pnl,
 
         "entry":                snap.get("entry"),
-        "target_price":         round(snap["entry"] * (1 + _target_pct() / 100), 2) if snap.get("entry") and S["target_order_id"] else None,
+        "target_price":         round(snap["entry"] * (1 + _standing_target_pct() / 100), 2) if snap.get("entry") and S["target_order_id"] else None,
+        "ai_tp_price":          round(snap["entry"] * (1 + snap.get("tp_ref_pct", _target_pct()) / 100), 2) if snap.get("entry") else None,
+        "tp_riding":            snap.get("tp_riding", False),
         "sl":                   snap.get("sl"),
         "sl_pct":               snap.get("sl_pct"),
         "qty":                  snap.get("qty"),
@@ -839,6 +845,10 @@ def _build_state_payload():
         "min_trail_pct_reached":snap.get("min_trail_pct_reached"),
         "option_atr":           snap.get("option_atr",        S["option_atr"]),
         "held_secs":            snap.get("held_secs", 0),
+        "timeout_eff_secs":     snap.get("timeout_eff_secs"),
+        "oco_armed":            snap.get("oco_armed", False),
+        "oco_target":           snap.get("oco_target"),
+        "oco_floor":            snap.get("oco_floor"),
         "momentum_score":       snap.get("momentum_score"),
         "move_type":            snap.get("move_type"),
         "breakeven_moved":      snap.get("breakeven_moved", False),
@@ -907,6 +917,7 @@ def _payload_slow() -> dict:
         "ai_brain":       _market_brain.state,
         "entry_analyzer": _entry_analyzer.state,
         "market_intel":   _market_intel.state,
+        "position_sizer": _position_sizer.state,
         "trade_budget":   _intel_context(_session_stats()).get("trade_budget", {}),
         "rsi":            _compute_rsi(ticks),
         "range_position": _session_range_position(ticks),
@@ -979,20 +990,23 @@ def _run_order_intent(intent, opened_payload=None, closed_payload=None):
                 if opened_payload:
                     opened_payload["order_id"] = oid
 
-                # ── Place standing LIMIT SELL at the configured target ────
-                # TARGET_LIMIT_PCT normally; SCALP_TARGET_PCT in scalp mode —
-                # so the displayed target and the actual order always agree.
+                # ── Place standing LIMIT SELL ─────────────────────────────
+                # With AI take-profit enabled this is a SAFETY order at
+                # target% × AI_TP_SAFETY_TARGET_MULT (disconnect net + spike
+                # catcher) — the AI books the actual profit via market sell.
+                # AI disabled → classic fixed target at target%.
                 entry_price = intent.get("entry_price")
                 if entry_price and entry_price > 0:
                     with _state_lock:
-                        tgt_pct = _target_pct()
+                        tgt_pct = _standing_target_pct()
                     target_price = round(entry_price * (1 + tgt_pct / 100), 2)
                     t_oid, t_err = broker.place_limit_sell(symbol, qty, target_price)
                     if t_oid:
                         with _state_lock:
                             S["target_order_id"] = t_oid
+                        _tgt_kind = "Safety target" if AI_TP_ENABLED else "Target"
                         log(
-                            f"🎯 Target SELL placed — ₹{target_price:.2f} (+{tgt_pct}%)  "
+                            f"🎯 {_tgt_kind} SELL placed — ₹{target_price:.2f} (+{tgt_pct}%)  "
                             f"order_id={t_oid}",
                             "success",
                         )
@@ -1303,6 +1317,15 @@ def process_ticks(ticks, mark_ws=True):
                                 if partial.get("order_intent"):
                                     # Queue partial sell — will be executed after lock
                                     S["_partial_order"] = partial["order_intent"]
+                            elif exit_result.get("event_type") == "oco_armed":
+                                # Timeout expired flat — trade stays open under a
+                                # virtual OCO bracket instead of a market exit
+                                log_entries.append((
+                                    f"⏱️ Timeout → OCO bracket armed: "
+                                    f"target ₹{exit_result['target']:.2f} / "
+                                    f"floor ₹{exit_result['floor']:.2f} "
+                                    f"(grace {int(exit_result['grace_secs'])}s)",
+                                    "warning"))
                             else:
                                 closed = _on_trade_closed_state(exit_result)
                                 trade_closed_payload = closed.get("trade_closed_payload")
@@ -1583,9 +1606,17 @@ def _resize_tick_deques():
 
 
 def _target_pct() -> float:
-    """Standing limit-sell target %. Scalp mode uses the scalp target so the
-    dashboard display and the actually-placed order never diverge."""
+    """AI take-profit REFERENCE %. Scalp mode uses the scalp target so the
+    dashboard display and the exit engine's decision level never diverge."""
     return SCALP_TARGET_PCT if S["scalp_mode"] != "off" else TARGET_LIMIT_PCT
+
+
+def _standing_target_pct() -> float:
+    """Distance of the real-mode standing LIMIT SELL. With the AI take-profit
+    deciding the actual booking, the resting order moves out to a safety
+    distance (disconnect net + spike catcher) instead of capping winners."""
+    pct = _target_pct()
+    return round(pct * AI_TP_SAFETY_TARGET_MULT, 2) if AI_TP_ENABLED else pct
 
 
 def _session_stats() -> dict:
@@ -1975,12 +2006,32 @@ def _enter_trade_state(side, nifty_price, override_params: dict | None = None,
     sl_pct_for_mm = p.get("sl_pct_p1", RC["sl_phase1_pct"])
     mm_lot_size   = sl.get("lot_size") or LOT_SIZE
 
-    # Position sizing — ATR-based risk management or max-capital
+    # Position sizing — AI sizer (warmup/recovery/confidence, capital- and
+    # loss-budget-capped) for auto entries; legacy ATR formula as fallback.
     capital      = S["capital"]
     cost_per_lot = opt_price * mm_lot_size
+    sizer_logs   = []
 
     if manual_qty is not None:
+        # Manual qty is the operator's call — never auto-sized
         auto_lots = max(1, int(manual_qty))
+    elif AI_SIZER_ENABLED:
+        auto_lots, size_reasons = _position_sizer.decide({
+            "capital":        capital,
+            "premium":        opt_price,
+            "lot_size":       mm_lot_size,
+            "opt_atr":        _compute_option_atr(seed),
+            "trades_today":   S["trades_today"],
+            "loss_streak":    S.get("loss_streak", 0),
+            "session_pnl":    S["session_pnl"],
+            "entry_score":    S.get("ai_entry_score"),
+            "sl_pct":         sl_pct_for_mm,
+            "max_daily_loss": RC["max_daily_loss"],
+        })
+        if size_reasons:
+            sizer_logs.append(
+                (f"🧮 AI size: {auto_lots} lot(s) — " + "; ".join(size_reasons),
+                 "info"))
     elif ATR_POSITION_SIZING:
         # ATR-based: risk MAX_RISK_PER_TRADE of capital per trade
         # lots = capital × risk% / (option_ATR × lot_size)
@@ -1993,9 +2044,10 @@ def _enter_trade_state(side, nifty_price, override_params: dict | None = None,
     else:
         auto_lots = max(1, int(capital / cost_per_lot)) if cost_per_lot > 0 else 1
 
-    # Loss streak reduction (auto sizing only — manual qty is the operator's call)
+    # Loss streak reduction (legacy auto sizing only — the AI sizer handles
+    # streaks itself via the budget-capped recovery factor)
     streak = S.get("loss_streak", 0)
-    if manual_qty is None and streak >= LOSS_STREAK_REDUCE_AFTER:
+    if manual_qty is None and not AI_SIZER_ENABLED and streak >= LOSS_STREAK_REDUCE_AFTER:
         reductions = min(streak - LOSS_STREAK_REDUCE_AFTER + 1, 3)
         auto_lots = max(1, int(auto_lots * (LOSS_STREAK_SIZE_MULT ** reductions)))
 
@@ -2022,6 +2074,7 @@ def _enter_trade_state(side, nifty_price, override_params: dict | None = None,
         sl_phase1_secs_override = p.get("sl_phase1_secs", None),
         trail_pct_override      = p.get("trail_pct",      None),
         timeout_secs_override   = p.get("timeout_secs",   None),
+        tp_pct_override         = _target_pct(),
         seed_prices=seed,
         symbol=S.get("index_name", ""),
         option_symbol=sl.get("symbol", ""),
@@ -2071,6 +2124,7 @@ def _enter_trade_state(side, nifty_price, override_params: dict | None = None,
             "info",
         ),
     ]
+    logs.extend(sizer_logs)
 
     trade_opened_payload = {
         "side":         side,
@@ -2132,6 +2186,9 @@ def _on_trade_closed_state(result):
         "sl":         f"SL hit ({sl_pct_used}%)",
         "trail":      f"Trail exit ({trail_label}  atr={atr_at_exit})",
         "timeout":    f"Timeout (>{RC['trade_timeout_secs']}s)",
+        "oco_target": "Timeout-OCO target hit 🎯 (swing high)",
+        "oco_floor":  "Timeout-OCO floor hit (swing low support broke)",
+        "ai_tp":      "AI take-profit 🎯 (momentum faded above target)",
         "manual":     "Manual exit (button)",
         "force_exit": "Force-exit (market close)",
         "ai_analyzer":    "AI Analyzer exit (multi-signal)",
@@ -2172,6 +2229,7 @@ def _on_trade_closed_state(result):
     # Teach the entry analyzer
     _entry_analyzer.on_trade_closed(result)
     _market_intel.on_trade_closed(result)
+    _position_sizer.on_trade_closed(result)
     ea = _entry_analyzer.state
 
     logs.append((
@@ -2855,6 +2913,7 @@ def _adopt_external_position(position: dict):
             sl_pct_p2_override      = params["sl_pct_p2"],
             trail_pct_override      = params["trail_pct"],
             timeout_secs_override   = params["timeout_secs"],
+            tp_pct_override         = _target_pct(),
             seed_prices=[entry_price, params["current_price"]],
             symbol=S.get("index_name", ""),
             option_symbol=symbol,
@@ -3053,7 +3112,7 @@ def on_set_mode(data):
 
     # Swap every learning engine to the mode-specific state file — demo
     # fills must never train real-money weights (and vice versa).
-    for eng in (_market_brain, _entry_analyzer, _market_intel):
+    for eng in (_market_brain, _entry_analyzer, _market_intel, _position_sizer):
         eng.set_mode(new_mode)
     S["exit_engine"]._exit_analyzer.set_mode(new_mode)
 

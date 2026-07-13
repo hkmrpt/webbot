@@ -62,7 +62,10 @@ const LEVEL_STYLE = {
   entry: { color: '#00d4ff', title: 'ENTRY' },
   sl:    { color: '#ff3d5c', title: 'SL'    },
   trail: { color: '#ffb020', title: 'TRAIL' },
-  tp:    { color: '#00e87a', title: 'TP'    },
+  tp:    { color: '#00e87a', title: 'AI-TP' },
+  // Timeout-OCO bracket — armed when a flat trade times out
+  oco_t: { color: '#3ddc97', title: 'OCO↑'  },
+  oco_f: { color: '#ff7a5c', title: 'OCO↓'  },
   // Manual-trade NIFTY levels — drawn on the NIFTY chart
   msl:   { color: '#ff3d5c', title: 'N-SL'  },
   mtp:   { color: '#00e87a', title: 'N-TP'  },
@@ -86,7 +89,8 @@ export class BotChart {
       option: { hist: [], ticks: [] },
     };
     this.markers  = [];
-    this.levels   = { ref: 0, entry: 0, sl: 0, trail: 0, tp: 0, msl: 0, mtp: 0 };
+    this.levels   = { ref: 0, entry: 0, sl: 0, trail: 0, tp: 0,
+                      oco_t: 0, oco_f: 0, msl: 0, mtp: 0 };
     this._pendingDefs  = [];     // [{id, side, watch, level, dir}]
     this._pendingLines = {};     // id -> priceLine (on the current chart)
     this._priceLines = {};
@@ -458,8 +462,9 @@ export class BotChart {
       delete this._priceLines[k];
     }
     // NIFTY chart: reference + manual NIFTY levels · option chart: trade levels
-    const wanted = this.source === 'nifty' ? ['ref', 'msl', 'mtp']
-                                           : ['entry', 'sl', 'trail', 'tp'];
+    const wanted = this.source === 'nifty'
+      ? ['ref', 'msl', 'mtp']
+      : ['entry', 'sl', 'trail', 'tp', 'oco_t', 'oco_f'];
     for (const k of wanted) {
       const price = this.levels[k];
       if (!price) continue;

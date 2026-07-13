@@ -10,6 +10,6 @@
     "trend_exhaustion": 1.0,
     "cascade_risk": 1.0
   },
-  "n_trades": 32,
+  "n_trades": 40,
   "n_correct_exits": 3
 }

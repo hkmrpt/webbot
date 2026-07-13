@@ -63,12 +63,14 @@ class ReplayRunner:
 
         import buy_exit_strategy as bes
         import exit_analyzer, market_brain, entry_analyzer, market_intelligence
+        import position_sizer
         import excel_logger
         bes.LOG_DIR                  = self.out_dir
         exit_analyzer.STATE_DIR      = self.out_dir
         market_brain.STATE_DIR       = self.out_dir
         entry_analyzer.STATE_DIR     = self.out_dir
         market_intelligence.STATE_DIR = self.out_dir
+        position_sizer.STATE_DIR     = self.out_dir
         excel_logger.EXCEL_LOG       = os.path.join(self.out_dir, "trade_log.xlsx")
 
         from core import emitter

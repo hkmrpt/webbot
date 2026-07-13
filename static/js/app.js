@@ -41,7 +41,11 @@ socket.on('state', d => {
     entry: d.trade_open ? (d.entry || 0) : 0,
     sl:    d.trade_open ? (d.sl || 0) : 0,
     trail: d.trade_open && d.phase2 ? (d.trail_price || 0) : 0,
-    tp:    d.trade_open ? (d.scalp_tp || d.target_price || 0) : 0,
+    // AI take-profit reference — the brain books or rides at this level
+    tp:    d.trade_open ? (d.ai_tp_price || d.scalp_tp || 0) : 0,
+    // Timeout-OCO bracket (only while armed)
+    oco_t: d.trade_open && d.oco_armed ? (d.oco_target || 0) : 0,
+    oco_f: d.trade_open && d.oco_armed ? (d.oco_floor || 0) : 0,
     msl:   ml ? ml.sl : 0,      // manual NIFTY levels → NIFTY chart
     mtp:   ml ? ml.tp : 0,
   });

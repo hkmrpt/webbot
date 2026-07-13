@@ -237,6 +237,11 @@ export function updateAI(d) {
   setText('aiWr', brain.n_trades ? Math.round((brain.win_rate || 0) * 100) + '%' : '—');
   setText('aiModeBadge', brain.mode || d.trading_mode || 'demo');
 
+  // Position sizer: learned size multiplier · trades taught
+  const sz = d.position_sizer || {};
+  setText('aiSizer', sz.mult !== undefined
+    ? `${Number(sz.mult).toFixed(2)}× · ${fmtI(sz.n_trades)}t` : '—');
+
   // Warmup gates (v9.5): AI exits unlock at 10 trades, trained entry gate at 20
   const n = brain.n_trades || 0;
   const exitPct  = Math.min(1, n / 10), entryPct = Math.min(1, n / 20);
@@ -283,7 +288,16 @@ const TC_ROWS = [
   ['Entry',       d => fmt(d.entry)],
   ['Current',     d => fmt(d.opt_price)],
   ['Stop loss',   d => `${fmt(d.sl)} (${fmt(d.sl_pct, 1)}%)`],
-  ['Target',      d => d.target_price ? fmt(d.target_price) : '—'],
+  ['AI target',   d => d.ai_tp_price
+      ? fmt(d.ai_tp_price) + (d.tp_riding ? ' · riding 🏇' : '')
+      : '—'],
+  ['Safety order',d => d.target_price ? fmt(d.target_price) : '—'],
+  ['Timeout',     d => d.timeout_eff_secs
+      ? `${fmtI(d.held_secs)}/${fmt(d.timeout_eff_secs, 0)}s`
+      : '—'],
+  ['OCO bracket', d => d.oco_armed
+      ? `${fmt(d.oco_floor)} ↔ ${fmt(d.oco_target)}`
+      : '—'],
   ['Trail price', d => d.trail_price ? fmt(d.trail_price) : '—'],
   ['Trail %',     d => fmt(d.trail_pct, 1) + '%'],
   ['ATR trail',   d => fmt(d.atr_trail_pct, 1) + '%'],
@@ -304,7 +318,10 @@ export function updateTradeCard(d) {
   }
   const open = !!d.trade_open;
   setText('tcSide', open ? `${d.active_side || ''} ${d.fast_entry ? '· FAST' : ''}` : 'NO TRADE');
-  const badge = open ? (d.phase2 ? 'TRAILING' : 'OPEN')
+  const badge = open
+    ? (d.oco_armed ? 'OCO ARMED'
+       : d.tp_riding ? 'TP RIDING'
+       : d.phase2 ? 'TRAILING' : 'OPEN')
     : (d.active_status && d.active_status.startsWith('closed_')
         ? d.active_status.replace('closed_', '').toUpperCase() : 'idle');
   setText('tcBadge', badge);
@@ -315,7 +332,9 @@ export function updateTradeCard(d) {
     const held = d.held_secs || 0;
     setText('tcHeld', held + 's');
     const bar = $('tcTimerBar');
-    const pct = Math.min(100, held / 90 * 100);
+    // Adaptive timeout: the bar fills toward the momentum-scaled deadline
+    const deadline = d.timeout_eff_secs || 90;
+    const pct = Math.min(100, held / deadline * 100);
     if (last.get('tbar') !== pct) { last.set('tbar', pct); bar.style.width = pct + '%'; }
   } else {
     setText('tcHeld', '—');
